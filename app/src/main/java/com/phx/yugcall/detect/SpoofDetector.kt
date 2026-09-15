@@ -11,7 +11,24 @@ import kotlin.math.exp
  * in a product whose entire output is a trust judgement.
  */
 sealed interface DetectorState {
-    data class Ready(val modelName: String, val inputSamples: Int) : DetectorState
+    /**
+     * The model is being read and compiled off the main thread. Reading a
+     * ~1.2 MB asset and building an ORT session with full graph optimisation
+     * takes long enough to jank Activity startup if done inline.
+     */
+    data object Loading : DetectorState
+
+    /**
+     * @param backend the provider that actually loaded, which may differ from
+     *   the one requested if it was unavailable on this device.
+     */
+    data class Ready(
+        val modelName: String,
+        val inputSamples: Int,
+        val backend: ExecutionBackend,
+        val threads: Int,
+    ) : DetectorState
+
     data class Unavailable(val reason: String) : DetectorState
 }
 

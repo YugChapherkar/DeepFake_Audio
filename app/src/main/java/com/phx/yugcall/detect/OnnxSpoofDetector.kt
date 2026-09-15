@@ -3,6 +3,7 @@ package com.phx.yugcall.detect
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
 import ai.onnxruntime.OrtSession
+import ai.onnxruntime.TensorInfo
 import android.content.Context
 import android.util.Log
 import java.io.FileNotFoundException
@@ -13,12 +14,8 @@ private const val TAG = "OnnxSpoofDetector"
 /**
  * Runs an AASIST-style countermeasure through ONNX Runtime.
  *
- * Deliberately CPU-only for now. At 85k parameters the arithmetic is trivial,
- * and the NPU story on Android is not worth the complexity yet: NNAPI was
- * deprecated in Android 15, and the LiteRT NPU delegate currently ships for
- * Qualcomm while Pixel and Samsung are still pending. AASIST's graph-attention
- * blocks are also the ops most likely to fall back to CPU inside a vendor
- * compiler. Measure on CPU first; move only if the numbers demand it.
+ * CPU-first by design. See [ExecutionBackend] for why the NPU is not a live
+ * option on Tensor G1 hardware, and `docs/MODEL.md` for measured latency.
  */
 class OnnxSpoofDetector private constructor(
     private val environment: OrtEnvironment,
@@ -27,9 +24,12 @@ class OnnxSpoofDetector private constructor(
     private val outputName: String,
     private val inputSamples: Int,
     modelName: String,
+    backend: ExecutionBackend,
+    threads: Int,
 ) : SpoofDetector {
 
-    override val state: DetectorState = DetectorState.Ready(modelName, inputSamples)
+    override val state: DetectorState =
+        DetectorState.Ready(modelName, inputSamples, backend, threads)
 
     @Synchronized
     override fun score(samples: FloatArray): WindowScore {
@@ -54,8 +54,14 @@ class OnnxSpoofDetector private constructor(
     }
 
     companion object {
-        /** Bundled model asset. Absent from the repo build until exported — see tools/export_aasist_onnx.py. */
         const val DEFAULT_ASSET = "aasist_l.onnx"
+
+        /**
+         * Two intra-op threads matches Tensor G1's pair of Cortex-X1 cores.
+         * More threads spend longer in the barrier than in the kernels for a
+         * model this small.
+         */
+        const val DEFAULT_THREADS = 2
 
         /**
          * Loads [assetName] from `src/main/assets`.
@@ -63,31 +69,48 @@ class OnnxSpoofDetector private constructor(
          * Returns an [UnavailableDetector] rather than throwing when the model
          * is missing or unreadable, so the app can start and tell the user it
          * cannot analyse audio instead of crashing or inventing a score.
+         *
+         * If [backend] cannot be enabled the session still loads on plain CPU,
+         * and [DetectorState.Ready.backend] reports what actually applied.
          */
-        fun fromAsset(context: Context, assetName: String = DEFAULT_ASSET): SpoofDetector {
+        fun fromAsset(
+            context: Context,
+            assetName: String = DEFAULT_ASSET,
+            backend: ExecutionBackend = ExecutionBackend.DEFAULT,
+            threads: Int = DEFAULT_THREADS,
+        ): SpoofDetector {
             return try {
                 val bytes = context.assets.open(assetName).use { it.readBytes() }
                 val environment = OrtEnvironment.getEnvironment()
+
+                var applied = ExecutionBackend.CPU
                 val options = OrtSession.SessionOptions().apply {
                     setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                    // Two threads is the sweet spot for a model this size: more
-                    // threads spend longer in the barrier than in the kernels.
-                    setIntraOpNumThreads(2)
-                    runCatching { addXnnpack(mapOf("intra_op_num_threads" to "2")) }
-                        .onFailure { Log.i(TAG, "XNNPACK unavailable, using default CPU kernels") }
+                    setIntraOpNumThreads(threads)
+                    when (backend) {
+                        ExecutionBackend.XNNPACK -> runCatching {
+                            addXnnpack(mapOf("intra_op_num_threads" to threads.toString()))
+                            applied = ExecutionBackend.XNNPACK
+                        }.onFailure { Log.i(TAG, "XNNPACK unavailable, falling back to CPU", it) }
+
+                        ExecutionBackend.NNAPI -> runCatching {
+                            addNnapi()
+                            applied = ExecutionBackend.NNAPI
+                        }.onFailure { Log.i(TAG, "NNAPI unavailable, falling back to CPU", it) }
+
+                        ExecutionBackend.CPU -> Unit
+                    }
                 }
                 val session = environment.createSession(bytes, options)
 
-                val inputName = session.inputNames.firstOrNull()
-                    ?: error("model exposes no inputs")
-                val outputName = session.outputNames.firstOrNull()
-                    ?: error("model exposes no outputs")
+                val inputName = session.inputNames.firstOrNull() ?: error("model exposes no inputs")
+                val outputName = session.outputNames.firstOrNull() ?: error("model exposes no outputs")
                 val inputSamples = session.inputInfo[inputName]
-                    ?.let { (it.info as? ai.onnxruntime.TensorInfo)?.shape?.lastOrNull()?.toInt() }
+                    ?.let { (it.info as? TensorInfo)?.shape?.lastOrNull()?.toInt() }
                     ?.takeIf { it > 0 }
                     ?: error("could not read the model's input length")
 
-                Log.i(TAG, "loaded $assetName: input=$inputName[$inputSamples] output=$outputName")
+                Log.i(TAG, "loaded $assetName on ${applied.label} x$threads: in=$inputName[$inputSamples]")
                 OnnxSpoofDetector(
                     environment = environment,
                     session = session,
@@ -95,6 +118,8 @@ class OnnxSpoofDetector private constructor(
                     outputName = outputName,
                     inputSamples = inputSamples,
                     modelName = assetName,
+                    backend = applied,
+                    threads = threads,
                 )
             } catch (e: FileNotFoundException) {
                 Log.w(TAG, "model asset '$assetName' not bundled", e)
