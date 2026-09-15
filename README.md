@@ -1,108 +1,114 @@
 # VoxShield: AI Voice Deepfake Detection & Call Protection
 
-VoxShield is a privacy-focused Android security application that analyzes voice communication in near real time, estimates the likelihood of synthetic or manipulated speech, and warns users when a caller may be using an AI-generated or cloned voice.
+VoxShield is a privacy-focused Android security application that analyzes voice
+communication in near real time, estimates the likelihood of synthetic or
+manipulated speech, and warns users when a caller may be using an AI-generated
+or cloned voice.
+
+**Inference runs entirely on the device.** No audio leaves the phone.
 
 ---
 
-## 📂 Project Structure (Android)
+## 📂 Project Structure
 
-The application follows an MVVM (Model-View-ViewModel) architecture using Jetpack Compose.
+MVVM with Jetpack Compose.
 
 ```text
 app/src/main/java/com/phx/yugcall/
-├── MainActivity.kt      # Main UI Entry point (VoxShield Home, Analysis Cards)
-├── MainViewModel.kt     # State management, History tracking, API/Recorder bridge
-├── AudioRecorder.kt     # MediaRecorder implementation for mic capture
-├── RiskEngine.kt        # Logic for categorizing synthetic probability scores
-└── ui/theme/            # Material3 Theme, Typography, and Color definitions
+├── MainActivity.kt          # Compose UI: status, result card, scan history
+├── MainViewModel.kt         # UiState, live scoring loop, file analysis
+├── RiskEngine.kt            # Calibration, thresholds, multi-window aggregation
+├── audio/
+│   ├── AudioFormatSpec.kt   # The 16 kHz / 64,600-sample contract
+│   ├── AudioCapture.kt      # AudioRecord -> overlapping PCM windows
+│   └── AudioDecoder.kt      # MediaCodec -> 16 kHz mono float PCM
+├── detect/
+│   ├── SpoofDetector.kt     # Detector interface, score types, padding
+│   └── OnnxSpoofDetector.kt # ONNX Runtime session
+└── ui/theme/                # Material3 theme + risk palette
+
+app/src/main/assets/aasist_l.onnx   # Pretrained AASIST-L (see docs/MODEL.md)
+tools/export_aasist_onnx.py         # Regenerates the asset from upstream weights
 ```
 
----
+## 🔬 How it works
 
-## 🗺️ Step-by-Step Project Roadmap
+1. `AudioCapture` opens `AudioRecord` at 16 kHz mono PCM, preferring the
+   `UNPROCESSED` source so AGC and noise suppression do not erase the artefacts
+   the model looks for.
+2. Samples accumulate into 64,600-sample (~4.04 s) windows, emitted once per
+   second. Windows below an RMS silence gate are skipped rather than scored.
+3. `OnnxSpoofDetector` runs AASIST-L over each window and returns two logits.
+4. `RiskEngine` converts the bona fide margin to a probability through a
+   calibration step, then aggregates the last ~15 windows at the 90th percentile
+   so a single noisy window cannot escalate a whole call.
+5. The UI shows the risk band, how many windows backed it, and — while the model
+   is uncalibrated — explicitly declines to render a percentage.
 
-### Phase 1: Foundation (Current State)
-- [x] Basic UI with Jetpack Compose.
-- [x] Local Audio Recording & File Picking.
-- [x] Simulated Risk Engine & Scan History.
-- [x] Permissions handling (Mic/Storage).
+**Read [`docs/MODEL.md`](docs/MODEL.md) before trusting any number this app
+produces.** The bundled model reports 0.99% EER in-domain and degrades sharply
+outside it, the score is not yet calibrated, and the risk thresholds are
+inherited placeholders.
 
-### Phase 2: Backend Integration (Next Up)
-- [ ] Connect Android app to external API using Retrofit.
-- [ ] Implement live WebSocket streaming for real-time analysis.
-- [ ] Replace mock results with real ML inference data.
+## 🗺️ Roadmap
 
-### Phase 3: Advanced Detection
-- [ ] Implement WebRTC for controlled VoIP calling protection.
-- [ ] Research and implement `CallScreeningService` for native call hooks.
-- [ ] Add "Trusted Contact" verification workflow.
+### Phase 1: Foundation — done
+- [x] Compose UI, permissions, scan history.
+- [x] Streaming 16 kHz PCM capture (`AudioRecord`).
+- [x] File decode and analysis (`MediaCodec`).
+- [x] On-device ONNX inference with pretrained AASIST-L.
+- [x] Silence gating, multi-window aggregation, honest "unavailable" state.
 
-### Phase 4: Optimization & Privacy
-- [ ] Move model inference to TFLite/ONNX for on-device processing.
-- [ ] Implement end-to-end encryption for any data sent to the cloud.
+### Phase 2: Make the number mean something — next
+- [ ] Fit Platt calibration on a held-out validation split.
+- [ ] Derive risk thresholds from a target false-positive rate.
+- [ ] Report EER on a corpus that was never trained on (in-the-wild, ASVspoof2021 DF).
+- [ ] Replace the linear resampler in `AudioDecoder` with windowed-sinc.
 
----
+### Phase 3: Robustness
+- [ ] Fine-tune with RawBoost + codec augmentation (AMR-NB, Opus, µ-law).
+- [ ] Add room-impulse-response / replay augmentation for speakerphone capture.
+- [ ] On-device latency and battery benchmarks per SoC tier.
 
-## 🛠️ Backend Handoff: Requirements for Development
+### Phase 4: Call integration
+- [ ] Foreground service with `microphone` type for background scanning.
+- [ ] `CallScreeningService` for caller-ID-based screening (note: gives number, never audio).
+- [ ] "Trusted contact" verification workflow.
 
-To the Backend Developer: Please build a service with the following specifications.
+### Phase 5: Optimization
+- [ ] int8 post-training quantization; measure the EER cost.
+- [ ] Evaluate a conv-only architecture (log-mel + MobileNetV3) if NPU offload
+      becomes necessary — see the NPU discussion in `docs/MODEL.md`.
 
-### 1. Environment
-- **Framework:** FastAPI (Python 3.10+)
-- **ML backbone:** PyTorch or ONNX Runtime.
-- **Backbone Models:** Wav2Vec 2.0, HuBERT, or wavLM fine-tuned for deepfake detection.
+## ⚠️ Platform constraints worth knowing up front
 
-### 2. Mandatory Endpoints
+- **You cannot capture call audio on a stock device.** `VOICE_CALL` /
+  `VOICE_DOWNLINK` require the privileged `CAPTURE_AUDIO_OUTPUT` permission.
+  `CallScreeningService` gives you the caller's number, not their voice. The
+  only route for a normal app is speakerphone plus the microphone, which means
+  the far end arrives re-recorded through a room.
+- **NNAPI is deprecated** (Android 15). The LiteRT NPU delegate is the
+  replacement and currently covers Qualcomm, with Pixel and Samsung pending.
 
-#### `POST /v1/analyze` (File-based)
-Used for non-real-time file analysis.
-- **Request:** `multipart/form-data` with key `audio_file`.
-- **Logic:**
-  1. Resample to 16kHz Mono.
-  2. Run through Deepfake Detection Model.
-- **Response Schema:**
-```json
-{
-  "synthetic_probability": 0.85,
-  "risk_level": "HIGH",
-  "confidence": 0.90
-}
+## 🔒 Privacy
+
+- Audio is captured, scored and discarded in memory. Nothing is written to disk
+  and nothing is transmitted.
+- There is no network code in the app. `INTERNET` is declared in the manifest
+  only for future use and can be removed.
+
+## 🛠️ Building
+
+```bash
+./gradlew :app:assembleDebug     # APK
+./gradlew :app:testDebugUnitTest # unit tests
 ```
 
-#### `WS /v1/stream` (Real-time)
-WebSocket endpoint for live microphone/call analysis.
-- **Protocol:** Binary WebSocket.
-- **Expected Input:** Binary chunks of raw audio (PCM 16-bit, 16kHz).
-- **Processing:** Perform rolling inference on 2.5-second windows.
-- **Output:** Stream JSON packets back to Android every 500ms with updated risk scores.
+Requires JDK 21 and the Android SDK. The build uses AGP 9's built-in Kotlin
+support, so the `org.jetbrains.kotlin.android` plugin is deliberately **not**
+applied — adding it will break the build.
 
-### 3. Audio Specs
-The model **must** be trained/configured for:
-- Sample Rate: 16,000 Hz
-- Channels: Mono
-- Format: PCM 16-bit or AAC/Opus in container.
+## 📄 Third-party
 
----
-
-## 🔗 How to Connect Android to Backend
-
-### Step 1: Base URL Configuration
-Update the `BASE_URL` in the Android networking layer (using Retrofit) to point to your hosted backend (e.g., `https://api.voxshield.com/`).
-
-### Step 2: Request Model
-The Android app uses **Retrofit** and **OkHttp**. Ensure the backend supports `Multipart` requests for file uploads and `Application/Json` for history/auth.
-
-### Step 3: WebSocket Connection
-Android will use `OkHttp.newWebSocket()` to connect to the `/v1/stream` endpoint.
-- **Sending:** The app will send `ByteString` chunks of audio.
-- **Receiving:** The app expects a JSON string containing the `synthetic_probability`.
-
-### Step 4: Security
-- The backend should implement **Bearer Token (JWT)** authentication.
-- Android will include this token in the `Authorization` header for all requests.
-
----
-
-## 🔒 Privacy Policy for Developers
-- **Data Retention:** Never store raw audio files on the server longer than the duration of the inference.
-- **Logging:** Do not log metadata that can identify a specific conversation or user voice.
+The bundled model derives from [clovaai/aasist](https://github.com/clovaai/aasist),
+MIT licensed, © NAVER Corp. See `docs/MODEL.md`.
