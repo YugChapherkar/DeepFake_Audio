@@ -15,21 +15,70 @@ MVVM with Jetpack Compose.
 
 ```text
 app/src/main/java/com/phx/yugcall/
-├── MainActivity.kt          # Compose UI: status, result card, scan history
-├── MainViewModel.kt         # UiState, live scoring loop, file analysis
+├── VoxShieldApplication.kt  # App-wide model instance + shared live session
+├── MainActivity.kt          # Compose UI: hero gauge, actions, scan history
+├── MainViewModel.kt         # Coordinates the shared session + file analysis
 ├── RiskEngine.kt            # Calibration, thresholds, multi-window aggregation
 ├── audio/
 │   ├── AudioFormatSpec.kt   # The 16 kHz / 64,600-sample contract
 │   ├── AudioCapture.kt      # AudioRecord -> overlapping PCM windows
 │   └── AudioDecoder.kt      # MediaCodec -> 16 kHz mono float PCM
 ├── detect/
-│   ├── SpoofDetector.kt     # Detector interface, score types, padding
-│   └── OnnxSpoofDetector.kt # ONNX Runtime session
-└── ui/theme/                # Material3 theme + risk palette
+│   ├── SpoofDetector.kt          # Detector interface, score types, padding
+│   ├── OnnxSpoofDetector.kt      # ONNX Runtime session
+│   ├── ExecutionBackend.kt       # XNNPACK / NNAPI / CPU selection
+│   └── LiveListeningSession.kt   # Mic + model + aggregation, shared by app & overlay
+├── history/
+│   └── ScanHistory.kt       # App-wide scan history (LIVE / OVERLAY / FILE)
+├── consent/
+│   ├── Disclaimers.kt           # Canonical disclaimer copy
+│   ├── ConsentStore.kt          # Tracks acceptance (SharedPreferences)
+│   ├── DisclaimerScreen.kt      # First-run gate, scroll-to-unlock
+│   └── OverlayConsentScreen.kt  # Second gate before Call Protection
+├── overlay/
+│   ├── CallGuardOverlayService.kt # Foreground service hosting the bubble
+│   ├── OverlayBubble.kt           # Collapsed/expanded Compose UI
+│   ├── OverlayLifecycleOwner.kt   # Lifecycle plumbing for a WindowManager view
+│   ├── OverlayPermission.kt       # SYSTEM_ALERT_WINDOW helpers
+│   └── CallStateMonitor.kt        # Detects an active call (AudioManager.mode)
+└── ui/
+    ├── theme/                # Material3 theme, dynamic colour, risk palette
+    └── components/           # RiskGauge, InCallBanner
 
 app/src/main/assets/aasist_l.onnx   # Pretrained AASIST-L (see docs/MODEL.md)
 tools/export_aasist_onnx.py         # Regenerates the asset from upstream weights
 ```
+
+## 📞 Call Protection (floating overlay)
+
+A draggable bubble that sits over any other app — the phone/dialer, a VoIP
+app, a video call — showing a live risk indicator you can check mid-call.
+
+**What it actually does:** starts/stops the same shared listening session used
+by the in-app "Listen" button, so a scan from the bubble shows up in Recent
+Scans exactly like an in-app one. It shows the same on-device gauge, latency,
+and calibration caveats.
+
+**What it cannot do — by Android's design, not this app's:** capture the other
+side of a live cellular call directly. Android silences microphone input from
+every third-party app, this one included, the instant `MODE_IN_CALL` or
+`MODE_IN_COMMUNICATION` is active — there is no permission that lifts this
+([source](https://developer.android.com/media/platform/sharing-audio-input)).
+The overlay detects this via `CallStateMonitor` and shows a banner saying so
+rather than silently scoring silence as "sounds fine." It works over
+speakerphone, a video/VoIP call, or any other audio the microphone can
+actually pick up from the room.
+
+**Setup requires two separate consent screens, then two permissions:**
+1. The general disclaimer (`DisclaimerScreen`), required before anything else.
+2. `OverlayConsentScreen` — specific to this feature, covering call-recording
+   consent law and the `SYSTEM_ALERT_WINDOW` permission's own risk profile.
+3. `RECORD_AUDIO`, if not already granted.
+4. `SYSTEM_ALERT_WINDOW`, granted only through Settings (there is no runtime
+   dialog for it).
+
+A persistent low-priority notification stays visible for as long as the
+service can access the microphone, with a one-tap Stop action.
 
 ## 🔬 How it works
 
@@ -71,7 +120,8 @@ inherited placeholders.
 - [ ] On-device latency and battery benchmarks per SoC tier.
 
 ### Phase 4: Call integration
-- [ ] Foreground service with `microphone` type for background scanning.
+- [x] Foreground service with `microphone` type — the Call Protection overlay.
+- [x] Floating draggable indicator, shared live session, in-call honesty banner.
 - [ ] `CallScreeningService` for caller-ID-based screening (note: gives number, never audio).
 - [ ] "Trusted contact" verification workflow.
 
@@ -94,12 +144,23 @@ inherited placeholders.
   one theoretical route — is deprecated as of Android 15, needs int8, and does
   not cover AASIST's graph attention. The app runs on CPU and measures itself.
 
+## ⚠️ Legal: recording consent
+
+Many jurisdictions require **every** party's consent before a call can be
+recorded or analysed — often called "two-party" or "all-party" consent — and
+the rules vary by state and country. **You are responsible for knowing and
+following the law that applies to you and the other party** before enabling
+Call Protection. `OverlayConsentScreen` states this and requires an explicit
+checkbox before the feature can be turned on; it does not and cannot make the
+feature legal to use in a given situation.
+
 ## 🔒 Privacy
 
 - Audio is captured, scored and discarded in memory. Nothing is written to disk
   and nothing is transmitted.
-- There is no network code in the app. `INTERNET` is declared in the manifest
-  only for future use and can be removed.
+- There is no network code in the app. `INTERNET` is not declared at all.
+- The floating overlay only ever renders VoxShield's own risk indicator. It
+  does not read, intercept, or overlay content from any other app.
 
 ## 🛠️ Building
 
