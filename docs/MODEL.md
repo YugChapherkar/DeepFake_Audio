@@ -9,9 +9,9 @@ exported from [clovaai/aasist](https://github.com/clovaai/aasist) (MIT, © NAVER
 |---|---|
 | Parameters | 85,306 |
 | Asset size | ~1.16 MB (ONNX, fp32, opset 20) |
-| Input | `waveform`, float32 `[batch, 64600]`, 16 kHz mono, range [-1, 1] |
-| Batching | one window per call — the exporter pins the output batch to 1 |
+| Input | `waveform`, float32 `[1, 64600]`, 16 kHz mono, range [-1, 1] |
 | Output | `logits`, float32 `[1, 2]` — index 0 spoof, index 1 bona fide |
+| Shapes | fully static; one window per call |
 | Published accuracy | 0.99% EER / 0.0309 min t-DCF, ASVspoof2019 LA eval |
 
 The class order comes from `aasist/data_utils.py`, which assigns `1` to
@@ -109,6 +109,56 @@ fits, but the headroom is perhaps 2-3x rather than the 100x the parameter count
 suggests — AASIST's graph attention costs far more than its weight count
 implies. **Benchmark on the actual target tier before treating the CPU path as
 settled**; `OnnxSpoofDetector` is the only place that needs to change.
+
+## Measuring on the target device
+
+A desktop number decides nothing. Run the benchmark on the actual handset:
+
+```bash
+./gradlew :app:connectedDebugAndroidTest
+adb logcat -s VoxShieldBenchmark
+```
+
+`OnDeviceBenchmarkTest` sweeps every [`ExecutionBackend`] (XNNPACK, NNAPI, plain
+CPU) at 1, 2 and 4 intra-op threads, reports median and p95 per configuration,
+and fails if nothing fits inside the 1000 ms hop. The app also shows the live
+median in its status card (`aasist_l.onnx · XNNPACK x2 · 287 ms/window`), so a
+demo doubles as a measurement.
+
+## Target hardware: Pixel 6a (Google Tensor G1)
+
+**The Tensor TPU is not reachable for this model.** Three independent blocks,
+none of which is a scoping choice:
+
+1. **The Google Tensor SDK covers Tensor G5/G6 only** — the Pixel 10 family.
+   There is no G1/G2/G3 support, so Pixel 6/7/8 cannot use the LiteRT TPU path
+   at all. The SDK is also still beta and gated behind a signup.
+2. **ONNX Runtime ships no Edge TPU execution provider.** The Android AAR
+   exposes exactly three: NNAPI, XNNPACK and QNN (Qualcomm only). Nothing
+   targets Tensor.
+3. **NNAPI, the one theoretical route, is a dead end here.** Deprecated in
+   Android 15, it needs a fully int8 model to reach the Edge TPU, and its
+   operator set does not cover AASIST's heterogeneous graph attention. The graph
+   would be partitioned across NNAPI and CPU, which typically costs more than
+   it saves.
+
+`ExecutionBackend.NNAPI` exists so point 3 can be measured rather than believed.
+If it wins on your device, the default should change.
+
+### int8 quantization is also blocked, for now
+
+`onnxruntime.quantization.quantize_dynamic` fails on the exported graph with
+`[ShapeInferenceError] Inferred shape and existing shape differ in dimension 0:
+(160) vs (2)`, originating inside the graph-attention subgraph. Top-level shape
+inference succeeds, so this is a genuine inconsistency in the attention ops, not
+an artefact of the export configuration. Quantizing AASIST needs graph surgery
+or a different export path — it is not a quick win.
+
+This is the same property from three directions: AASIST's graph attention is
+awkward for quantizers, for NPU partitioners, and for vendor compilers alike.
+If latency ever becomes the binding constraint, changing architecture (log-mel
+plus a conv-only backbone such as MobileNetV3) buys more than fighting AASIST
+through a delegate.
 
 ## Why CPU and not the NPU
 

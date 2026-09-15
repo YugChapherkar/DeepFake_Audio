@@ -76,9 +76,11 @@ inherited placeholders.
 - [ ] "Trusted contact" verification workflow.
 
 ### Phase 5: Optimization
-- [ ] int8 post-training quantization; measure the EER cost.
-- [ ] Evaluate a conv-only architecture (log-mel + MobileNetV3) if NPU offload
-      becomes necessary — see the NPU discussion in `docs/MODEL.md`.
+- [x] On-device benchmark across execution backends and thread counts.
+- [ ] int8 quantization — currently blocked by a shape inconsistency inside
+      AASIST's attention subgraph; needs graph surgery. See `docs/MODEL.md`.
+- [ ] Evaluate a conv-only architecture (log-mel + MobileNetV3) if offload ever
+      becomes necessary. On Tensor G1 the TPU is not reachable at all.
 
 ## ⚠️ Platform constraints worth knowing up front
 
@@ -87,8 +89,10 @@ inherited placeholders.
   `CallScreeningService` gives you the caller's number, not their voice. The
   only route for a normal app is speakerphone plus the microphone, which means
   the far end arrives re-recorded through a room.
-- **NNAPI is deprecated** (Android 15). The LiteRT NPU delegate is the
-  replacement and currently covers Qualcomm, with Pixel and Samsung pending.
+- **The Pixel 6a's TPU cannot be used.** Google's Tensor SDK covers Tensor
+  G5/G6 (Pixel 10) only; ONNX Runtime has no Edge TPU provider; and NNAPI — the
+  one theoretical route — is deprecated as of Android 15, needs int8, and does
+  not cover AASIST's graph attention. The app runs on CPU and measures itself.
 
 ## 🔒 Privacy
 
@@ -100,8 +104,10 @@ inherited placeholders.
 ## 🛠️ Building
 
 ```bash
-./gradlew :app:assembleDebug     # APK
-./gradlew :app:testDebugUnitTest # unit tests
+./gradlew :app:assembleDebug            # per-ABI APKs
+./gradlew :app:testDebugUnitTest        # unit tests (JVM)
+./gradlew :app:connectedDebugAndroidTest # on-device inference benchmark
+adb logcat -s VoxShieldBenchmark        # ...and its results
 ```
 
 Requires JDK 21 and the Android SDK. The build uses AGP 9's built-in Kotlin
