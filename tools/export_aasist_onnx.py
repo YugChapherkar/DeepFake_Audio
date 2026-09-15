@@ -85,11 +85,13 @@ def export(model: nn.Module, out: pathlib.Path) -> None:
         str(out),
         input_names=["waveform"],
         output_names=["logits"],
-        # The sample axis is fixed: the model is length-sensitive and scores are
-        # only comparable at the length it was trained on. Note that the exporter
-        # still pins the *output* batch to 1, so the app scores one window per
-        # call; batching would need the output axis freed as well.
-        dynamic_axes={"waveform": {0: "batch"}},
+        # Everything is static: [1, 64600] in, [1, 2] out.
+        #
+        # The sample axis has to be fixed because the model is length-sensitive
+        # and scores are only comparable at the length it was trained on. Batch
+        # is fixed at 1 because the exporter pins the *output* batch to 1
+        # regardless — declaring a dynamic input batch against a fixed output
+        # produces an incoherent graph that downstream tooling trips over.
         dynamo=True,
     )
 
