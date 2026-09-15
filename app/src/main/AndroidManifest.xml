@@ -2,21 +2,29 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!--
-      RECORD_AUDIO is the only permission this app needs. Inference is on-device
-      and there is no network code, so INTERNET is deliberately not declared —
-      that makes "no audio leaves the phone" verifiable from the manifest alone.
-
-      FOREGROUND_SERVICE, FOREGROUND_SERVICE_MICROPHONE and POST_NOTIFICATIONS
-      were declared before any service existed. Re-add them alongside the
-      service itself when background scanning lands (roadmap Phase 4).
+      Inference is on-device and there is no network code, so INTERNET is
+      deliberately not declared — that makes "no audio leaves the phone"
+      verifiable from the manifest alone.
     -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!--
+      Call Protection: a foreground service (so the microphone session survives
+      the app being backgrounded during a call) that draws a floating overlay.
+      Each permission is requested from the user explicitly, gated behind its
+      own consent screen — see consent/OverlayConsentScreen.kt.
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-feature
         android:name="android.hardware.microphone"
         android:required="true" />
 
     <application
+        android:name=".VoxShieldApplication"
         android:allowBackup="false"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
@@ -35,6 +43,11 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".overlay.CallGuardOverlayService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
     </application>
 
 </manifest>
