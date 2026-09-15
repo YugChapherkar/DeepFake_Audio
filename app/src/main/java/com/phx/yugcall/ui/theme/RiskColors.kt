@@ -8,29 +8,54 @@ import androidx.compose.ui.graphics.Color
 import com.phx.yugcall.RiskLevel
 
 /**
- * Risk colours for both themes.
+ * Semantic risk colours.
  *
- * The first version of this screen hardcoded light-mode hex values against the
- * default `onSurface` text colour, which rendered as light text on a pale green
- * card in dark mode. Each level now carries its own container and content
- * colour so contrast holds either way.
+ * Deliberately *not* derived from the dynamic colour scheme: "this may be a
+ * synthetic voice" must not change hue because the user changed wallpaper.
+ * Each level carries its own container, content and accent so contrast holds in
+ * both themes.
  */
 @Immutable
 data class RiskColors(
     val container: Color,
     val content: Color,
     val accent: Color,
+    val track: Color,
 )
 
-private val LightLow = RiskColors(Color(0xFFE8F5E9), Color(0xFF1B5E20), Color(0xFF2E7D32))
-private val LightMedium = RiskColors(Color(0xFFFFF8E1), Color(0xFF7A4F01), Color(0xFFB26A00))
-private val LightHigh = RiskColors(Color(0xFFFFEBEE), Color(0xFF8E1B1B), Color(0xFFC62828))
-private val LightNeutral = RiskColors(Color(0xFFEEEEEE), Color(0xFF37474F), Color(0xFF546E7A))
+private val LightLow = RiskColors(
+    container = Color(0xFFDCF5E3), content = Color(0xFF0B3D1E),
+    accent = Color(0xFF1B7F4B), track = Color(0xFFB9E7C9),
+)
+private val LightMedium = RiskColors(
+    container = Color(0xFFFFF1D6), content = Color(0xFF5C3B00),
+    accent = Color(0xFFB07400), track = Color(0xFFFFE0A8),
+)
+private val LightHigh = RiskColors(
+    container = Color(0xFFFFE3E1), content = Color(0xFF6E1512),
+    accent = Color(0xFFC2352E), track = Color(0xFFFFC7C3),
+)
+private val LightNeutral = RiskColors(
+    container = Color(0xFFE9E7F0), content = Color(0xFF3A3843),
+    accent = Color(0xFF6B6779), track = Color(0xFFD5D2DE),
+)
 
-private val DarkLow = RiskColors(Color(0xFF16301A), Color(0xFFA5D6A7), Color(0xFF81C784))
-private val DarkMedium = RiskColors(Color(0xFF332812), Color(0xFFFFE082), Color(0xFFFFCA28))
-private val DarkHigh = RiskColors(Color(0xFF3A1A1C), Color(0xFFEF9A9A), Color(0xFFE57373))
-private val DarkNeutral = RiskColors(Color(0xFF26292B), Color(0xFFCFD8DC), Color(0xFF90A4AE))
+private val DarkLow = RiskColors(
+    container = Color(0xFF10301C), content = Color(0xFFA6E7BF),
+    accent = Color(0xFF5FD18C), track = Color(0xFF1E4A30),
+)
+private val DarkMedium = RiskColors(
+    container = Color(0xFF332612), content = Color(0xFFFFDFA8),
+    accent = Color(0xFFF0BC5E), track = Color(0xFF4A3A1C),
+)
+private val DarkHigh = RiskColors(
+    container = Color(0xFF3A1817), content = Color(0xFFFFB9B4),
+    accent = Color(0xFFFF8C84), track = Color(0xFF522422),
+)
+private val DarkNeutral = RiskColors(
+    container = Color(0xFF232130), content = Color(0xFFCFCAD9),
+    accent = Color(0xFF9A94AB), track = Color(0xFF32303E),
+)
 
 @Composable
 @ReadOnlyComposable
@@ -43,7 +68,7 @@ fun riskColors(level: RiskLevel): RiskColors {
     }
 }
 
-/** Used for "listening", "analysing" and "nothing to report" states. */
+/** Used for idle, loading, listening and "nothing to report" states. */
 @Composable
 @ReadOnlyComposable
 fun neutralRiskColors(): RiskColors = if (isSystemInDarkTheme()) DarkNeutral else LightNeutral
