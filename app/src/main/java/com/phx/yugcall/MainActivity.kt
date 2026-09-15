@@ -8,10 +8,13 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,24 +26,32 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Upload
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -48,52 +59,56 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.phx.yugcall.audio.AudioFormatSpec
+import com.phx.yugcall.consent.ConsentStore
+import com.phx.yugcall.consent.DisclaimerBullet
+import com.phx.yugcall.consent.DisclaimerScreen
+import com.phx.yugcall.consent.Disclaimers
+import com.phx.yugcall.consent.OverlayConsentScreen
 import com.phx.yugcall.detect.DetectorState
+import com.phx.yugcall.history.ScanRecord
+import com.phx.yugcall.overlay.CallGuardOverlayService
+import com.phx.yugcall.overlay.OverlayPermission
+import com.phx.yugcall.ui.components.InCallBanner
+import com.phx.yugcall.ui.components.RiskGauge
 import com.phx.yugcall.ui.theme.YugCallTheme
 import com.phx.yugcall.ui.theme.neutralRiskColors
 import com.phx.yugcall.ui.theme.riskColors
 import java.text.DateFormat
 import java.util.Date
-import kotlin.math.log10
+
+private enum class AppScreen { DISCLAIMER, HOME, OVERLAY_CONSENT }
 
 class MainActivity : ComponentActivity() {
-    private val viewModel by viewModels<MainViewModel> { MainViewModel.factory(this) }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            YugCallTheme {
-                val snackbarHostState = remember { SnackbarHostState() }
-                Scaffold(
-                    modifier = Modifier.fillMaxSize(),
-                    snackbarHost = { SnackbarHost(snackbarHostState) },
-                ) { innerPadding ->
-                    VoxShieldHome(
-                        viewModel = viewModel,
-                        snackbarHostState = snackbarHostState,
-                        modifier = Modifier.padding(innerPadding),
-                    )
-                }
-            }
+            YugCallTheme { VoxShieldApp() }
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun VoxShieldHome(
-    viewModel: MainViewModel,
-    snackbarHostState: SnackbarHostState,
-    modifier: Modifier = Modifier,
-) {
-    val state by viewModel.uiState.collectAsStateWithLifecycle()
+private fun VoxShieldApp() {
     val context = LocalContext.current
+    val viewModel: MainViewModel = viewModel()
+    val consentStore = remember { ConsentStore(context) }
+    var screen by rememberSaveable {
+        mutableStateOf(if (consentStore.hasAcceptedDisclaimer) AppScreen.HOME else AppScreen.DISCLAIMER)
+    }
+    val snackbarHostState = remember { SnackbarHostState() }
+    var showAbout by rememberSaveable { mutableStateOf(false) }
 
     var hasMicPermission by remember {
         mutableStateOf(
@@ -101,18 +116,63 @@ fun VoxShieldHome(
                 PackageManager.PERMISSION_GRANTED
         )
     }
-
-    val permissionLauncher = rememberLauncherForActivityResult(
+    var pendingMicGrantAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val micPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
         hasMicPermission = granted
-        // Start immediately on grant instead of making the user tap twice.
-        if (granted) viewModel.startListening()
+        val action = pendingMicGrantAction
+        pendingMicGrantAction = null
+        if (granted) action?.invoke()
+    }
+
+    var awaitingOverlayPermission by rememberSaveable { mutableStateOf(false) }
+    val overlaySettingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { /* handled on ON_RESUME below — Settings returns via the back stack, not a result code */ }
+
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && awaitingOverlayPermission) {
+                awaitingOverlayPermission = false
+                if (OverlayPermission.isGranted(context)) {
+                    CallGuardOverlayService.start(context)
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    fun proceedPastOverlayConsent() {
+        if (!OverlayPermission.isGranted(context)) {
+            awaitingOverlayPermission = true
+            overlaySettingsLauncher.launch(OverlayPermission.requestIntent(context))
+        } else {
+            CallGuardOverlayService.start(context)
+        }
+    }
+
+    fun beginOverlaySetup() {
+        if (!consentStore.hasAcceptedOverlayConsent) {
+            screen = AppScreen.OVERLAY_CONSENT
+            return
+        }
+        if (!hasMicPermission) {
+            pendingMicGrantAction = { proceedPastOverlayConsent() }
+            micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            proceedPastOverlayConsent()
+        }
     }
 
     val audioPickerLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri -> viewModel.analyseFile(uri) }
+
+    val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val overlayRunning by CallGuardOverlayService.isRunning.collectAsStateWithLifecycle()
 
     LaunchedEffect(state.message) {
         state.message?.let {
@@ -121,70 +181,136 @@ fun VoxShieldHome(
         }
     }
 
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+    ) { padding ->
+        when (screen) {
+            AppScreen.DISCLAIMER -> DisclaimerScreen(
+                onAccept = { consentStore.hasAcceptedDisclaimer = true; screen = AppScreen.HOME },
+                modifier = Modifier.padding(padding),
+            )
+
+            AppScreen.OVERLAY_CONSENT -> OverlayConsentScreen(
+                onAgree = {
+                    consentStore.hasAcceptedOverlayConsent = true
+                    screen = AppScreen.HOME
+                    beginOverlaySetup()
+                },
+                onCancel = { screen = AppScreen.HOME },
+                modifier = Modifier.padding(padding),
+            )
+
+            AppScreen.HOME -> VoxShieldHome(
+                state = state,
+                overlayRunning = overlayRunning,
+                onToggleListen = {
+                    if (!hasMicPermission) {
+                        pendingMicGrantAction = { viewModel.toggleListening() }
+                        micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    } else {
+                        viewModel.toggleListening()
+                    }
+                },
+                onUpload = { audioPickerLauncher.launch("audio/*") },
+                onToggleOverlay = {
+                    if (overlayRunning) CallGuardOverlayService.stop(context) else beginOverlaySetup()
+                },
+                onShowAbout = { showAbout = true },
+                modifier = Modifier.padding(padding),
+            )
+        }
+    }
+
+    if (showAbout) {
+        val sheetState = rememberModalBottomSheetState()
+        ModalBottomSheet(onDismissRequest = { showAbout = false }, sheetState = sheetState) {
+            Column(Modifier.padding(horizontal = 24.dp).padding(bottom = 32.dp)) {
+                Text(
+                    "Limitations & disclaimers",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(16.dp))
+                Disclaimers.generalPoints.forEach { point ->
+                    DisclaimerBullet(point)
+                    Spacer(Modifier.height(12.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun VoxShieldHome(
+    state: ScreenState,
+    overlayRunning: Boolean,
+    onToggleListen: () -> Unit,
+    onUpload: () -> Unit,
+    onToggleOverlay: () -> Unit,
+    onShowAbout: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = 24.dp, vertical = 16.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            text = "VoxShield",
-            style = MaterialTheme.typography.headlineLarge,
-            fontWeight = FontWeight.Bold,
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "VoxShield",
+                style = MaterialTheme.typography.headlineLarge,
+                fontWeight = FontWeight.Bold,
+            )
+            IconButton(onClick = onShowAbout) {
+                Icon(Icons.Default.Info, contentDescription = "Limitations & disclaimers")
+            }
+        }
 
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(8.dp))
 
-        (state.detectorState as? DetectorState.Unavailable)?.let { unavailable ->
+        (state.live.detectorState as? DetectorState.Unavailable)?.let { unavailable ->
             DetectorUnavailableCard(unavailable.reason)
             Spacer(Modifier.height(16.dp))
         }
 
-        StatusCard(state)
-
-        Spacer(Modifier.height(16.dp))
-
-        when (val outcome = state.liveOutcome) {
-            is AnalysisOutcome.Scored -> {
-                AnalysisResultCard(outcome)
-                Spacer(Modifier.height(16.dp))
-            }
-            is AnalysisOutcome.NoSpeech -> {
-                InfoCard("No speech detected — every window was below the silence threshold.")
-                Spacer(Modifier.height(16.dp))
-            }
-            is AnalysisOutcome.Failed -> {
-                InfoCard("Analysis failed: ${outcome.reason}")
-                Spacer(Modifier.height(16.dp))
-            }
-            null -> Unit
+        if (state.inCall) {
+            InCallBanner()
+            Spacer(Modifier.height(16.dp))
         }
+
+        HeroCard(state)
+
+        Spacer(Modifier.height(20.dp))
 
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             MainActionButton(
-                text = if (state.isListening) "Stop" else "Listen",
+                text = if (state.live.isListening) "Stop" else "Listen",
                 icon = Icons.Default.Mic,
                 enabled = state.detectorReady && !state.isAnalysing,
                 modifier = Modifier.weight(1f),
-                onClick = {
-                    when {
-                        state.isListening -> viewModel.stopListening()
-                        hasMicPermission -> viewModel.startListening()
-                        else -> permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                    }
-                },
+                onClick = onToggleListen,
             )
             MainActionButton(
                 text = "Upload",
                 icon = Icons.Default.Upload,
-                enabled = state.detectorReady && !state.isListening && !state.isAnalysing,
+                enabled = state.detectorReady && !state.live.isListening && !state.isAnalysing,
                 modifier = Modifier.weight(1f),
-                onClick = { audioPickerLauncher.launch("audio/*") },
+                onClick = onUpload,
             )
         }
+
+        Spacer(Modifier.height(20.dp))
+
+        CallProtectionCard(overlayRunning = overlayRunning, onToggle = onToggleOverlay)
 
         Spacer(Modifier.height(24.dp))
 
@@ -208,13 +334,12 @@ fun VoxShieldHome(
             )
         }
 
-        // weight(1f) is load-bearing: without it this list is the last child of a
-        // non-scrollable Column and collapses to zero height on short screens.
+        // weight(1f) is load-bearing: without it this list is the last child of
+        // a non-scrollable Column and collapses to zero height on short screens.
         LazyColumn(
-            modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
+            modifier = Modifier.fillMaxWidth().weight(1f),
             verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = PaddingValues(bottom = 12.dp),
         ) {
             items(state.history, key = { it.id }) { record -> HistoryItem(record) }
         }
@@ -222,99 +347,124 @@ fun VoxShieldHome(
 }
 
 @Composable
-private fun StatusCard(state: UiState) {
-    val loading = state.detectorState is DetectorState.Loading
-
+private fun HeroCard(state: ScreenState) {
+    val outcome = state.displayedOutcome as? AnalysisOutcome.Scored
     val colors = when {
-        state.isListening || state.isAnalysing || loading -> neutralRiskColors()
+        state.live.isListening || state.isAnalysing -> neutralRiskColors()
+        outcome != null -> riskColors(outcome.riskLevel)
         state.detectorReady -> riskColors(RiskLevel.LOW)
         else -> riskColors(RiskLevel.HIGH)
     }
 
-    val title = when {
-        loading -> "Loading model"
-        state.isAnalysing -> "Analysing file"
-        state.isListening -> "Listening"
-        state.detectorReady -> "Ready"
-        else -> "Unavailable"
-    }
-
-    val ready = state.detectorState as? DetectorState.Ready
-    val latency = state.medianInferenceMillis?.let { " · ${it.toInt()} ms/window" }.orEmpty()
+    val ready = state.live.detectorState as? DetectorState.Ready
+    val latencySuffix = state.live.medianInferenceMillis?.let { " · ${it.toInt()} ms/window" }.orEmpty()
 
     val subtitle = when {
-        loading -> "Preparing on-device inference"
-        state.isAnalysing -> "Decoding and scoring audio$latency"
-        state.isListening ->
-            "${"%.1f".format(AudioFormatSpec.WINDOW_DURATION_SECONDS)} s window every second$latency"
-        ready != null -> "${ready.modelName} · ${ready.backend.label} x${ready.threads}$latency"
+        state.live.detectorState is DetectorState.Loading -> "Preparing on-device inference"
+        state.isAnalysing -> "Decoding and scoring audio$latencySuffix"
+        state.live.isListening ->
+            "${"%.1f".format(AudioFormatSpec.WINDOW_DURATION_SECONDS)} s window every second$latencySuffix"
+        ready != null -> "${ready.modelName} · ${ready.backend.label} x${ready.threads}$latencySuffix"
         else -> "No model loaded"
     }
 
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = colors.container),
+        shape = MaterialTheme.shapes.large,
     ) {
-        Column(Modifier.padding(20.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = colors.content,
+        Column(
+            modifier = Modifier.padding(24.dp).fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                when {
+                    state.live.detectorState is DetectorState.Loading || state.isAnalysing ->
+                        CircularProgressIndicator(modifier = Modifier.size(176.dp).padding(48.dp), color = colors.accent)
+                    outcome != null -> RiskGauge(
+                        fraction = if (outcome.isCalibrated) outcome.spoofProbability else null,
+                        trackColor = colors.track,
+                        progressColor = colors.accent,
+                        label = if (outcome.isCalibrated) "spoof score" else "risk: ${outcome.riskLevel.name}",
                     )
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.content,
-                    )
-                }
-                if (state.isAnalysing || loading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(32.dp),
-                        color = colors.accent,
-                    )
-                } else {
-                    Icon(
-                        imageVector = if (state.isListening) Icons.Default.Mic else Icons.Default.Shield,
-                        contentDescription = null,
-                        tint = colors.accent,
-                        modifier = Modifier.size(40.dp),
+                    else -> RiskGauge(
+                        fraction = null,
+                        trackColor = colors.track,
+                        progressColor = colors.accent,
+                        label = if (state.live.isListening) "listening…" else "idle",
+                        centerText = if (state.detectorReady) "Ready" else "—",
                     )
                 }
             }
 
-            if (state.isListening) {
-                Spacer(Modifier.height(12.dp))
-                InputLevelMeter(state.inputLevel, colors.accent)
+            Spacer(Modifier.height(12.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodyMedium,
+                color = colors.content,
+            )
+
+            if (outcome != null && !outcome.isCalibrated) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "Score is uncalibrated — the model's raw output is not a " +
+                        "probability, so no percentage is shown. The risk band above is " +
+                        "still meaningful.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.content,
+                )
+            }
+
+            if (outcome?.riskLevel == RiskLevel.HIGH) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "⚠ Possible AI-generated voice. Verify the caller " +
+                        "independently — call back on a known number.",
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                    color = colors.content,
+                )
             }
         }
     }
 }
 
-/** Log-scaled so ordinary speech fills a useful part of the bar. */
 @Composable
-private fun InputLevelMeter(rms: Float, tint: androidx.compose.ui.graphics.Color) {
-    val db = if (rms <= 1e-6f) -60f else (20f * log10(rms)).coerceIn(-60f, 0f)
-    val fraction = (db + 60f) / 60f
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(
-            imageVector = Icons.Default.GraphicEq,
-            contentDescription = "Input level",
-            tint = tint,
-            modifier = Modifier.size(18.dp),
-        )
-        Spacer(Modifier.width(8.dp))
-        LinearProgressIndicator(
-            progress = { fraction },
-            modifier = Modifier.fillMaxWidth(),
-            color = tint,
-        )
+private fun CallProtectionCard(overlayRunning: Boolean, onToggle: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Row(
+            modifier = Modifier.padding(20.dp).fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                color = MaterialTheme.colorScheme.tertiaryContainer,
+                modifier = Modifier.size(44.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        Icons.Default.Videocam,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                    )
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Call Protection", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (overlayRunning) "Floating indicator active — drag it anywhere"
+                    else "A floating shield you can start during any call or video",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Switch(checked = overlayRunning, onCheckedChange = { onToggle() })
+        }
     }
 }
 
@@ -324,39 +474,16 @@ private fun DetectorUnavailableCard(reason: String) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(containerColor = colors.container),
+        shape = MaterialTheme.shapes.medium,
     ) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.Warning, contentDescription = null, tint = colors.accent)
             Spacer(Modifier.width(12.dp))
             Column {
-                Text(
-                    text = "Detector unavailable",
-                    fontWeight = FontWeight.Bold,
-                    color = colors.content,
-                )
-                Text(
-                    text = reason,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.content,
-                )
+                Text("Detector unavailable", fontWeight = FontWeight.Bold, color = colors.content)
+                Text(reason, style = MaterialTheme.typography.bodySmall, color = colors.content)
             }
         }
-    }
-}
-
-@Composable
-private fun InfoCard(text: String) {
-    val colors = neutralRiskColors()
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = colors.container),
-    ) {
-        Text(
-            text = text,
-            modifier = Modifier.padding(16.dp),
-            style = MaterialTheme.typography.bodyMedium,
-            color = colors.content,
-        )
     }
 }
 
@@ -372,84 +499,13 @@ fun MainActionButton(
         onClick = onClick,
         enabled = enabled,
         modifier = modifier.height(88.dp),
-        shape = MaterialTheme.shapes.medium,
+        shape = MaterialTheme.shapes.large,
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Icon(imageVector = icon, contentDescription = null)
             Spacer(Modifier.height(8.dp))
             Text(text = text)
         }
-    }
-}
-
-@Composable
-fun AnalysisResultCard(outcome: AnalysisOutcome.Scored) {
-    val colors = riskColors(outcome.riskLevel)
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = colors.container),
-        border = BorderStroke(1.dp, colors.accent),
-    ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(
-                text = "Analysis Result",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Bold,
-                color = colors.content,
-            )
-            Spacer(Modifier.height(8.dp))
-
-            LabelledRow("Risk level", outcome.riskLevel.name, colors.content, bold = true)
-            LabelledRow("Synthetic score", outcome.percentLabel, colors.content)
-            LabelledRow(
-                "Evidence",
-                "${outcome.windowsScored} window(s) scored" +
-                    if (outcome.windowsSkipped > 0) ", ${outcome.windowsSkipped} silent" else "",
-                colors.content,
-            )
-
-            if (!outcome.isCalibrated) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "Score is uncalibrated — the model's raw output is not a probability, " +
-                        "so no percentage is shown. Ranking between scans is still meaningful.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = colors.content,
-                )
-            }
-
-            if (outcome.riskLevel == RiskLevel.HIGH) {
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = "⚠ Possible AI-generated voice. Verify the caller independently — " +
-                        "call back on a known number.",
-                    style = MaterialTheme.typography.bodySmall,
-                    fontWeight = FontWeight.Bold,
-                    color = colors.content,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-private fun LabelledRow(
-    label: String,
-    value: String,
-    color: androidx.compose.ui.graphics.Color,
-    bold: Boolean = false,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-    ) {
-        Text(text = label, fontWeight = FontWeight.Medium, color = color)
-        Text(
-            text = value,
-            fontWeight = if (bold) FontWeight.Bold else FontWeight.Normal,
-            color = color,
-        )
     }
 }
 
@@ -462,9 +518,8 @@ fun HistoryItem(record: ScanRecord) {
 
     Card(
         modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant
-        ),
+        shape = MaterialTheme.shapes.medium,
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
     ) {
         Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
             Icon(Icons.Default.History, contentDescription = null, tint = colors.accent)

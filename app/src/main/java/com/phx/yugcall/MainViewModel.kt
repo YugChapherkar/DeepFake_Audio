@@ -1,209 +1,114 @@
 package com.phx.yugcall
 
 import android.Manifest
-import android.content.Context
+import android.app.Application
 import android.net.Uri
 import android.util.Log
 import androidx.annotation.RequiresPermission
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import androidx.lifecycle.viewmodel.CreationExtras
-import com.phx.yugcall.audio.AudioCapture
 import com.phx.yugcall.audio.AudioDecoder
 import com.phx.yugcall.audio.AudioFormatSpec
 import com.phx.yugcall.audio.rmsOf
 import com.phx.yugcall.detect.DetectorState
-import com.phx.yugcall.detect.OnnxSpoofDetector
+import com.phx.yugcall.detect.LiveState
 import com.phx.yugcall.detect.SpoofDetector
 import com.phx.yugcall.detect.WindowScore
+import com.phx.yugcall.history.ScanRecord
+import com.phx.yugcall.history.ScanSource
+import com.phx.yugcall.overlay.CallStateMonitor
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val TAG = "MainViewModel"
 
-/** How many recent windows contribute to the live verdict (~15 s of audio). */
-private const val LIVE_WINDOW_MEMORY = 15
-
-enum class ScanSource { LIVE, FILE }
-
-data class ScanRecord(
-    val id: Long,
-    val source: ScanSource,
-    val timestampMillis: Long,
-    val outcome: AnalysisOutcome.Scored,
-)
-
-data class UiState(
-    val detectorState: DetectorState,
-    val isListening: Boolean = false,
+/**
+ * Everything the in-app screen renders: the shared live session's state, plus
+ * the file-analysis path (which is UI-only — the overlay has no use for it),
+ * shared history, and whether a cellular/VoIP call is currently active.
+ */
+data class ScreenState(
+    val live: LiveState = LiveState(),
     val isAnalysing: Boolean = false,
-    val liveOutcome: AnalysisOutcome? = null,
-    val inputLevel: Float = 0f,
+    val fileOutcome: AnalysisOutcome? = null,
     val history: List<ScanRecord> = emptyList(),
     val message: String? = null,
-    /** Median wall-clock inference time per window, once anything has been scored. */
-    val medianInferenceMillis: Double? = null,
+    val inCall: Boolean = false,
 ) {
-    val detectorReady: Boolean get() = detectorState is DetectorState.Ready
+    /** File analysis, when present, takes over the hero card from a live run. */
+    val displayedOutcome: AnalysisOutcome? get() = fileOutcome ?: live.outcome
+    val detectorReady: Boolean get() = live.detectorReady
 }
 
-class MainViewModel(
-    private val capture: AudioCapture,
-    private val decoder: AudioDecoder,
-    private val detectorProvider: suspend () -> SpoofDetector,
-    private val riskEngine: RiskEngine = RiskEngine(),
-) : ViewModel() {
+/**
+ * Thin coordinator over the app-wide `LiveListeningSession` (shared with the
+ * call-protection overlay — see [VoxShieldApplication]) plus the in-app-only
+ * file-upload path.
+ */
+class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val _uiState = MutableStateFlow(UiState(detectorState = DetectorState.Loading))
-    val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+    private val voxApp get() = getApplication<VoxShieldApplication>()
+    private val decoder = AudioDecoder(application)
+    private val riskEngine = RiskEngine()
+    private val callStateMonitor = CallStateMonitor(application)
 
-    /** Set once the model finishes loading; null until then and if loading failed. */
-    @Volatile
-    private var detector: SpoofDetector? = null
-
-    init {
-        // Off the main thread: ORT session creation is slow enough to be
-        // visible as a stall during Activity startup.
-        viewModelScope.launch {
-            val loaded = withContext(Dispatchers.IO) { detectorProvider() }
-            detector = loaded
-            _uiState.update { it.copy(detectorState = loaded.state) }
-        }
-    }
-
-    private fun requireDetector(): SpoofDetector =
-        detector ?: error("Detector is still loading")
-
-    private var listenJob: Job? = null
     private var analyseJob: Job? = null
-    private var nextRecordId = 0L
-    private val liveScores = ArrayDeque<WindowScore>()
-    private var liveSkipped = 0
-    private val latenciesMillis = ArrayDeque<Double>()
+    private val _isAnalysing = MutableStateFlow(false)
+    private val _fileOutcome = MutableStateFlow<AnalysisOutcome?>(null)
+    private val _message = MutableStateFlow<String?>(null)
 
-    /**
-     * Times one inference and folds it into the rolling median.
-     *
-     * Reported in the UI because a number measured on the device is the only
-     * thing that settles whether the CPU path is fast enough on this hardware.
-     *
-     * Does not switch dispatcher: callers are responsible for being off the
-     * main thread already, so a long offline run dispatches once rather than
-     * once per window.
-     */
-    private fun timedScore(samples: FloatArray): WindowScore {
-        val detector = requireDetector()
-        val started = System.nanoTime()
-        val score = detector.score(samples)
-        recordLatency((System.nanoTime() - started) / 1_000_000.0)
-        return score
-    }
-
-    private fun recordLatency(millis: Double) {
-        latenciesMillis.addLast(millis)
-        while (latenciesMillis.size > LATENCY_MEMORY) latenciesMillis.removeFirst()
-        val sorted = latenciesMillis.sorted()
-        val median = if (sorted.size % 2 == 1) {
-            sorted[sorted.size / 2]
-        } else {
-            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
-        }
-        _uiState.update { it.copy(medianInferenceMillis = median) }
-    }
+    val uiState: StateFlow<ScreenState> = combine(
+        voxApp.liveSession.state,
+        voxApp.scanHistory.records,
+        combine(_isAnalysing, _fileOutcome, _message) { analysing, outcome, msg -> Triple(analysing, outcome, msg) },
+        callStateMonitor.flow(),
+    ) { live, history, (analysing, fileOutcome, message), inCall ->
+        ScreenState(
+            live = live,
+            history = history,
+            isAnalysing = analysing,
+            fileOutcome = fileOutcome,
+            message = message,
+            inCall = inCall,
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ScreenState())
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun toggleListening() {
-        if (_uiState.value.isListening) stopListening() else startListening()
-    }
-
-    @RequiresPermission(Manifest.permission.RECORD_AUDIO)
-    fun startListening() {
-        if (listenJob?.isActive == true) return
-        if (!_uiState.value.detectorReady) {
-            _uiState.update { it.copy(message = detectorBlockedMessage()) }
-            return
-        }
-
-        liveScores.clear()
-        liveSkipped = 0
-        _uiState.update {
-            it.copy(isListening = true, liveOutcome = null, message = null, inputLevel = 0f)
-        }
-
-        listenJob = viewModelScope.launch {
-            try {
-                capture.windows().collect { window ->
-                    _uiState.update { it.copy(inputLevel = window.rms) }
-
-                    if (window.isSilent) {
-                        liveSkipped++
-                    } else {
-                        val score = withContext(Dispatchers.Default) {
-                            timedScore(window.samples)
-                        }
-                        liveScores.addLast(score)
-                        while (liveScores.size > LIVE_WINDOW_MEMORY) liveScores.removeFirst()
-                    }
-
-                    val outcome = riskEngine.assess(liveScores.toList(), liveSkipped)
-                    _uiState.update { it.copy(liveOutcome = outcome) }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                Log.e(TAG, "live capture failed", t)
-                _uiState.update {
-                    it.copy(
-                        isListening = false,
-                        message = t.message ?: "Microphone capture failed.",
-                    )
-                }
-            }
-        }
-    }
-
-    fun stopListening() {
-        if (!_uiState.value.isListening) return
-        listenJob?.cancel()
-        listenJob = null
-
-        val outcome = riskEngine.assess(liveScores.toList(), liveSkipped)
-        liveScores.clear()
-        liveSkipped = 0
-        _uiState.update { state ->
-            state.copy(
-                isListening = false,
-                inputLevel = 0f,
-                liveOutcome = outcome,
-                history = state.history.prepend(outcome, ScanSource.LIVE),
-            )
+        if (uiState.value.live.isListening) {
+            voxApp.liveSession.stop(ScanSource.LIVE)
+        } else {
+            voxApp.liveSession.start()
         }
     }
 
     fun analyseFile(uri: Uri?) {
         if (uri == null) return
         if (analyseJob?.isActive == true) return
-        if (!_uiState.value.detectorReady) {
-            _uiState.update { it.copy(message = detectorBlockedMessage()) }
+        if (!uiState.value.detectorReady) {
+            _message.value = detectorBlockedMessage()
             return
         }
 
-        _uiState.update { it.copy(isAnalysing = true, message = null, liveOutcome = null) }
+        _isAnalysing.value = true
+        _fileOutcome.value = null
+        _message.value = null
 
         analyseJob = viewModelScope.launch {
             val outcome = try {
+                val detector = voxApp.detector()
                 val samples = decoder.decodeToMono16k(uri)
-                withContext(Dispatchers.Default) { scoreOffline(samples) }
+                withContext(Dispatchers.Default) { scoreOffline(samples, detector) }
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -211,14 +116,10 @@ class MainViewModel(
                 AnalysisOutcome.Failed(t.message ?: "Could not decode the selected file.")
             }
 
-            _uiState.update { state ->
-                state.copy(
-                    isAnalysing = false,
-                    liveOutcome = outcome,
-                    history = state.history.prepend(outcome, ScanSource.FILE),
-                    message = (outcome as? AnalysisOutcome.Failed)?.reason,
-                )
-            }
+            _isAnalysing.value = false
+            _fileOutcome.value = outcome
+            voxApp.scanHistory.add(outcome, ScanSource.FILE)
+            (outcome as? AnalysisOutcome.Failed)?.let { _message.value = it.reason }
         }
     }
 
@@ -227,7 +128,7 @@ class MainViewModel(
      * windows for responsiveness; offline there is no latency to hide, so
      * disjoint windows give independent evidence and cost less.
      */
-    private suspend fun scoreOffline(samples: FloatArray): AnalysisOutcome {
+    private suspend fun scoreOffline(samples: FloatArray, detector: SpoofDetector): AnalysisOutcome {
         val size = AudioFormatSpec.WINDOW_SAMPLES
         if (samples.isEmpty()) return AnalysisOutcome.Failed("The file contained no audio.")
 
@@ -246,7 +147,7 @@ class MainViewModel(
                 if (rmsOf(slice) < AudioFormatSpec.SILENCE_RMS_THRESHOLD) {
                     skipped++
                 } else {
-                    scores += timedScore(slice)
+                    scores += detector.score(slice)
                 }
             }
             offset = end
@@ -254,52 +155,20 @@ class MainViewModel(
         return riskEngine.assess(scores, skipped)
     }
 
-    private fun detectorBlockedMessage(): String = when (val s = _uiState.value.detectorState) {
+    private fun detectorBlockedMessage(): String = when (val s = uiState.value.live.detectorState) {
         is DetectorState.Loading -> "Still loading the model — try again in a moment."
         is DetectorState.Unavailable -> "Cannot analyse audio: ${s.reason}"
         is DetectorState.Ready -> "Detector is ready but the request was rejected."
     }
 
-    fun dismissMessage() = _uiState.update { it.copy(message = null) }
-
-    private fun List<ScanRecord>.prepend(
-        outcome: AnalysisOutcome,
-        source: ScanSource,
-    ): List<ScanRecord> {
-        val scored = outcome as? AnalysisOutcome.Scored ?: return this
-        val record = ScanRecord(
-            id = nextRecordId++,
-            source = source,
-            timestampMillis = System.currentTimeMillis(),
-            outcome = scored,
-        )
-        return (listOf(record) + this).take(MAX_HISTORY)
+    fun dismissMessage() {
+        _message.value = null
     }
 
     override fun onCleared() {
-        listenJob?.cancel()
         analyseJob?.cancel()
-        detector?.close()
-    }
-
-    companion object {
-        private const val MAX_HISTORY = 50
-        private const val LATENCY_MEMORY = 30
-
-        fun factory(context: Context): ViewModelProvider.Factory =
-            object : ViewModelProvider.Factory {
-                override fun <T : ViewModel> create(
-                    modelClass: Class<T>,
-                    extras: CreationExtras,
-                ): T {
-                    val app = context.applicationContext
-                    @Suppress("UNCHECKED_CAST")
-                    return MainViewModel(
-                        capture = AudioCapture(app),
-                        decoder = AudioDecoder(app),
-                        detectorProvider = { OnnxSpoofDetector.fromAsset(app) },
-                    ) as T
-                }
-            }
+        // The live session and the model belong to VoxShieldApplication, not
+        // this ViewModel — they must keep running if the overlay is using them
+        // after this screen is gone, so nothing here closes them.
     }
 }
