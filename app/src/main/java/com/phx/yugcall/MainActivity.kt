@@ -223,24 +223,31 @@ fun VoxShieldHome(
 
 @Composable
 private fun StatusCard(state: UiState) {
+    val loading = state.detectorState is DetectorState.Loading
+
     val colors = when {
-        state.isListening || state.isAnalysing -> neutralRiskColors()
+        state.isListening || state.isAnalysing || loading -> neutralRiskColors()
         state.detectorReady -> riskColors(RiskLevel.LOW)
         else -> riskColors(RiskLevel.HIGH)
     }
 
     val title = when {
+        loading -> "Loading model"
         state.isAnalysing -> "Analysing file"
         state.isListening -> "Listening"
         state.detectorReady -> "Ready"
         else -> "Unavailable"
     }
 
+    val ready = state.detectorState as? DetectorState.Ready
+    val latency = state.medianInferenceMillis?.let { " · ${it.toInt()} ms/window" }.orEmpty()
+
     val subtitle = when {
-        state.isAnalysing -> "Decoding and scoring audio"
-        state.isListening -> "Scoring a ${"%.1f".format(AudioFormatSpec.WINDOW_DURATION_SECONDS)} s " +
-            "window every second"
-        state.detectorReady -> (state.detectorState as DetectorState.Ready).modelName
+        loading -> "Preparing on-device inference"
+        state.isAnalysing -> "Decoding and scoring audio$latency"
+        state.isListening ->
+            "${"%.1f".format(AudioFormatSpec.WINDOW_DURATION_SECONDS)} s window every second$latency"
+        ready != null -> "${ready.modelName} · ${ready.backend.label} x${ready.threads}$latency"
         else -> "No model loaded"
     }
 
@@ -267,7 +274,7 @@ private fun StatusCard(state: UiState) {
                         color = colors.content,
                     )
                 }
-                if (state.isAnalysing) {
+                if (state.isAnalysing || loading) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(32.dp),
                         color = colors.accent,

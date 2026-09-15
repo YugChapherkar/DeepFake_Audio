@@ -51,6 +51,8 @@ data class UiState(
     val inputLevel: Float = 0f,
     val history: List<ScanRecord> = emptyList(),
     val message: String? = null,
+    /** Median wall-clock inference time per window, once anything has been scored. */
+    val medianInferenceMillis: Double? = null,
 ) {
     val detectorReady: Boolean get() = detectorState is DetectorState.Ready
 }
@@ -58,18 +60,66 @@ data class UiState(
 class MainViewModel(
     private val capture: AudioCapture,
     private val decoder: AudioDecoder,
-    private val detector: SpoofDetector,
+    private val detectorProvider: suspend () -> SpoofDetector,
     private val riskEngine: RiskEngine = RiskEngine(),
 ) : ViewModel() {
 
-    private val _uiState = MutableStateFlow(UiState(detectorState = detector.state))
+    private val _uiState = MutableStateFlow(UiState(detectorState = DetectorState.Loading))
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
+
+    /** Set once the model finishes loading; null until then and if loading failed. */
+    @Volatile
+    private var detector: SpoofDetector? = null
+
+    init {
+        // Off the main thread: ORT session creation is slow enough to be
+        // visible as a stall during Activity startup.
+        viewModelScope.launch {
+            val loaded = withContext(Dispatchers.IO) { detectorProvider() }
+            detector = loaded
+            _uiState.update { it.copy(detectorState = loaded.state) }
+        }
+    }
+
+    private fun requireDetector(): SpoofDetector =
+        detector ?: error("Detector is still loading")
 
     private var listenJob: Job? = null
     private var analyseJob: Job? = null
     private var nextRecordId = 0L
     private val liveScores = ArrayDeque<WindowScore>()
     private var liveSkipped = 0
+    private val latenciesMillis = ArrayDeque<Double>()
+
+    /**
+     * Times one inference and folds it into the rolling median.
+     *
+     * Reported in the UI because a number measured on the device is the only
+     * thing that settles whether the CPU path is fast enough on this hardware.
+     *
+     * Does not switch dispatcher: callers are responsible for being off the
+     * main thread already, so a long offline run dispatches once rather than
+     * once per window.
+     */
+    private fun timedScore(samples: FloatArray): WindowScore {
+        val detector = requireDetector()
+        val started = System.nanoTime()
+        val score = detector.score(samples)
+        recordLatency((System.nanoTime() - started) / 1_000_000.0)
+        return score
+    }
+
+    private fun recordLatency(millis: Double) {
+        latenciesMillis.addLast(millis)
+        while (latenciesMillis.size > LATENCY_MEMORY) latenciesMillis.removeFirst()
+        val sorted = latenciesMillis.sorted()
+        val median = if (sorted.size % 2 == 1) {
+            sorted[sorted.size / 2]
+        } else {
+            (sorted[sorted.size / 2 - 1] + sorted[sorted.size / 2]) / 2.0
+        }
+        _uiState.update { it.copy(medianInferenceMillis = median) }
+    }
 
     @RequiresPermission(Manifest.permission.RECORD_AUDIO)
     fun toggleListening() {
@@ -80,7 +130,7 @@ class MainViewModel(
     fun startListening() {
         if (listenJob?.isActive == true) return
         if (!_uiState.value.detectorReady) {
-            _uiState.update { it.copy(message = "No detector model loaded — cannot analyse audio.") }
+            _uiState.update { it.copy(message = detectorBlockedMessage()) }
             return
         }
 
@@ -99,7 +149,7 @@ class MainViewModel(
                         liveSkipped++
                     } else {
                         val score = withContext(Dispatchers.Default) {
-                            detector.score(window.samples)
+                            timedScore(window.samples)
                         }
                         liveScores.addLast(score)
                         while (liveScores.size > LIVE_WINDOW_MEMORY) liveScores.removeFirst()
@@ -144,7 +194,7 @@ class MainViewModel(
         if (uri == null) return
         if (analyseJob?.isActive == true) return
         if (!_uiState.value.detectorReady) {
-            _uiState.update { it.copy(message = "No detector model loaded — cannot analyse audio.") }
+            _uiState.update { it.copy(message = detectorBlockedMessage()) }
             return
         }
 
@@ -196,12 +246,18 @@ class MainViewModel(
                 if (rmsOf(slice) < AudioFormatSpec.SILENCE_RMS_THRESHOLD) {
                     skipped++
                 } else {
-                    scores += detector.score(slice)
+                    scores += timedScore(slice)
                 }
             }
             offset = end
         }
         return riskEngine.assess(scores, skipped)
+    }
+
+    private fun detectorBlockedMessage(): String = when (val s = _uiState.value.detectorState) {
+        is DetectorState.Loading -> "Still loading the model — try again in a moment."
+        is DetectorState.Unavailable -> "Cannot analyse audio: ${s.reason}"
+        is DetectorState.Ready -> "Detector is ready but the request was rejected."
     }
 
     fun dismissMessage() = _uiState.update { it.copy(message = null) }
@@ -223,11 +279,12 @@ class MainViewModel(
     override fun onCleared() {
         listenJob?.cancel()
         analyseJob?.cancel()
-        detector.close()
+        detector?.close()
     }
 
     companion object {
         private const val MAX_HISTORY = 50
+        private const val LATENCY_MEMORY = 30
 
         fun factory(context: Context): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
@@ -240,7 +297,7 @@ class MainViewModel(
                     return MainViewModel(
                         capture = AudioCapture(app),
                         decoder = AudioDecoder(app),
-                        detector = OnnxSpoofDetector.fromAsset(app),
+                        detectorProvider = { OnnxSpoofDetector.fromAsset(app) },
                     ) as T
                 }
             }
