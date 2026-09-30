@@ -45,29 +45,47 @@ app/src/main/java/com/phx/yugcall/
     ├── theme/                # Material3 theme, dynamic colour, risk palette
     └── components/           # RiskGauge, InCallBanner
 
-app/src/main/assets/aasist_l.onnx   # Pretrained AASIST-L (see docs/MODEL.md)
-tools/export_aasist_onnx.py         # Regenerates the asset from upstream weights
+app/src/main/assets/aasist_l.onnx   # Fine-tuned AASIST-L (see docs/MODEL.md)
+tools/export_aasist_onnx.py         # Exports a checkpoint to ONNX with a parity check
+tools/finetune_aasist.py            # Fine-tuning + evaluation job (see docs/TRAINING.md)
 ```
 
 ## 📞 Call Protection (floating overlay)
 
-A draggable bubble that sits over any other app — the phone/dialer, a VoIP
-app, a video call — showing a live risk indicator you can check mid-call.
+A small pill-shaped indicator that floats over any other app, including the
+phone app's call screen. It shows only an icon and a short status ("Tap to
+check", "Listening…", "High · 97%", "Muted by Android").
 
-**What it actually does:** starts/stops the same shared listening session used
-by the in-app "Listen" button, so a scan from the bubble shows up in Recent
-Scans exactly like an in-app one. It shows the same on-device gauge, latency,
-and calibration caveats.
+**How it behaves:**
+- **Arming.** The Call Protection switch arms it, and the pill appears straight
+  away.
+- **During a call.** When a call starts, a heads-up "Call detected"
+  notification appears; tapping it opens the pill. The ongoing notification
+  also has **Show** and **Stop** actions.
+- **Using the pill.** Tap it to start or stop a check. Drag it anywhere. Drop it
+  on the target that appears at the bottom of the screen while dragging to hide
+  it. Protection stays armed, so the next call notifies again.
+- **One session, one history.** The pill starts and stops the same shared
+  listening session as the in-app "Listen" button, so its scans land in Recent
+  Scans like any other.
 
 **What it cannot do — by Android's design, not this app's:** capture the other
 side of a live cellular call directly. Android silences microphone input from
 every third-party app, this one included, the instant `MODE_IN_CALL` or
 `MODE_IN_COMMUNICATION` is active — there is no permission that lifts this
 ([source](https://developer.android.com/media/platform/sharing-audio-input)).
-The overlay detects this via `CallStateMonitor` and shows a banner saying so
-rather than silently scoring silence as "sounds fine." It works over
-speakerphone, a video/VoIP call, or any other audio the microphone can
-actually pick up from the room.
+**Speakerphone does not get around this on the same phone.** Measured on a
+Pixel 6a during a speakerphone call: the system's recording monitor reported
+this app's capture as `silenced:true` for the whole call. So the phone taking
+the call can't check it. What works:
+
+- VoxShield on a **second phone** held near the call's speaker. That phone
+  isn't in a call, so it isn't silenced.
+- **Upload**, for recordings and voicemails afterwards.
+
+The app reads `AudioRecordingConfiguration.isClientSilenced()` and shows "Muted
+by Android" instead of an endless "Listening…". Video and internet calling
+apps hold the microphone too and haven't been tested.
 
 **Setup requires two separate consent screens, then two permissions:**
 1. The general disclaimer (`DisclaimerScreen`), required before anything else.
@@ -95,9 +113,21 @@ service can access the microphone, with a one-tap Stop action.
    is uncalibrated — explicitly declines to render a percentage.
 
 **Read [`docs/MODEL.md`](docs/MODEL.md) before trusting any number this app
-produces.** The bundled model reports 0.99% EER in-domain and degrades sharply
-outside it, the score is not yet calibrated, and the risk thresholds are
-inherited placeholders.
+produces.** The bundled model is AASIST-L fine-tuned for real-world audio: 9.2%
+EER on held-out In-the-Wild speakers, down from 41% for the pretrained
+checkpoint. It has never been measured on phone-microphone audio, its
+calibration reflects its dev split's class balance, and the risk thresholds are
+still placeholders.
+
+## 📚 Docs
+
+| Doc | What's in it |
+|---|---|
+| [`docs/PRESENTATION.md`](docs/PRESENTATION.md) | Presenter's brief: talk track, live demo script, likely questions |
+| [`docs/MODEL.md`](docs/MODEL.md) | The bundled model, calibration, latency, the Pixel 6a NPU question |
+| [`docs/TRAINING.md`](docs/TRAINING.md) | How the model is fine-tuned on Kaggle and shipped |
+| [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) | Every run and measurement, with results |
+| [`docs/ASVSPOOF5.md`](docs/ASVSPOOF5.md) | Notes on the ASVspoof 5 paper and what it changes here |
 
 ## 🗺️ Roadmap
 
@@ -108,15 +138,17 @@ inherited placeholders.
 - [x] On-device ONNX inference with pretrained AASIST-L.
 - [x] Silence gating, multi-window aggregation, honest "unavailable" state.
 
-### Phase 2: Make the number mean something — next
-- [ ] Fit Platt calibration on a held-out validation split.
+### Phase 2: Make the number mean something — in progress
+- [x] Fit Platt calibration on a held-out validation split.
 - [ ] Derive risk thresholds from a target false-positive rate.
-- [ ] Report EER on a corpus that was never trained on (in-the-wild, ASVspoof2021 DF).
+- [x] Report EER on a corpus that was never trained on (held-out In-the-Wild speakers).
+- [ ] Measure on phone-microphone recordings from the target device.
 - [ ] Replace the linear resampler in `AudioDecoder` with windowed-sinc.
 
 ### Phase 3: Robustness
-- [ ] Fine-tune with RawBoost + codec augmentation (AMR-NB, Opus, µ-law).
-- [ ] Add room-impulse-response / replay augmentation for speakerphone capture.
+- [x] Fine-tune with music/noise, reverb and telephone (8 kHz + µ-law) augmentation.
+- [ ] Real codec augmentation (Opus, AMR-NB, Speex) and ASVspoof 5 training data.
+- [ ] Test fake voices with background noise (suspected "noise means real" shortcut).
 - [ ] On-device latency and battery benchmarks per SoC tier.
 
 ### Phase 4: Call integration
@@ -136,9 +168,11 @@ inherited placeholders.
 
 - **You cannot capture call audio on a stock device.** `VOICE_CALL` /
   `VOICE_DOWNLINK` require the privileged `CAPTURE_AUDIO_OUTPUT` permission.
-  `CallScreeningService` gives you the caller's number, not their voice. The
-  only route for a normal app is speakerphone plus the microphone, which means
-  the far end arrives re-recorded through a room.
+  `CallScreeningService` gives you the caller's number, not their voice, and
+  the microphone is muted for every third-party app during a call — even on
+  speakerphone (measured on a Pixel 6a). The only route for a normal app is a
+  second device listening to the call's speaker, which means the far end
+  arrives re-recorded through a room.
 - **The Pixel 6a's TPU cannot be used.** Google's Tensor SDK covers Tensor
   G5/G6 (Pixel 10) only; ONNX Runtime has no Edge TPU provider; and NNAPI — the
   one theoretical route — is deprecated as of Android 15, needs int8, and does
