@@ -3,6 +3,7 @@ package com.phx.yugcall.detect
 import android.Manifest
 import androidx.annotation.RequiresPermission
 import com.phx.yugcall.AnalysisOutcome
+import com.phx.yugcall.Calibration
 import com.phx.yugcall.RiskEngine
 import com.phx.yugcall.audio.AudioCapture
 import com.phx.yugcall.history.ScanHistoryStore
@@ -46,7 +47,7 @@ class LiveListeningSession(
     private val capture: AudioCapture,
     private val detectorProvider: suspend () -> SpoofDetector,
     private val history: ScanHistoryStore,
-    private val riskEngine: RiskEngine = RiskEngine(),
+    private val riskEngine: RiskEngine = RiskEngine(calibration = Calibration.BUNDLED_MODEL),
 ) {
     private val _state = MutableStateFlow(LiveState())
     val state: StateFlow<LiveState> = _state.asStateFlow()
