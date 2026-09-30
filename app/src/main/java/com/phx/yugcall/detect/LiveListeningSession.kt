@@ -26,6 +26,8 @@ data class LiveState(
     val inputLevel: Float = 0f,
     val medianInferenceMillis: Double? = null,
     val error: String? = null,
+    /** Android is feeding us silence — during a call, for every third-party app. */
+    val silencedBySystem: Boolean = false,
 ) {
     val detectorReady: Boolean get() = detectorState is DetectorState.Ready
 }
@@ -81,7 +83,9 @@ class LiveListeningSession(
         listenJob = scope.launch {
             try {
                 capture.windows().collect { window ->
-                    _state.update { it.copy(inputLevel = window.rms) }
+                    _state.update {
+                        it.copy(inputLevel = window.rms, silencedBySystem = window.silencedBySystem)
+                    }
                     if (window.isSilent) {
                         skipped++
                     } else {
@@ -109,7 +113,9 @@ class LiveListeningSession(
         val outcome = riskEngine.assess(scores.toList(), skipped)
         scores.clear()
         skipped = 0
-        _state.update { it.copy(isListening = false, inputLevel = 0f, outcome = outcome) }
+        _state.update {
+            it.copy(isListening = false, inputLevel = 0f, outcome = outcome, silencedBySystem = false)
+        }
         history.add(outcome, source)
         return outcome
     }

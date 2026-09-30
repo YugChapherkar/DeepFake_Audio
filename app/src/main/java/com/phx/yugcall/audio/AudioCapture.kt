@@ -31,7 +31,11 @@ private const val PCM16_FULL_SCALE = 32768f
  * Note on call audio: `VOICE_CALL` / `VOICE_DOWNLINK` require the privileged
  * `CAPTURE_AUDIO_OUTPUT` permission and are not available to normal apps, so on
  * a stock device the far end of a call can only be captured acoustically over
- * speakerphone. Any model deployed here needs replay/room augmentation in
+ * a second device's microphone — measured on a Pixel 6a, Android silences
+ * this app's capture for the whole of a cellular call even with speakerphone
+ * on (`AudioRecordingConfiguration.isClientSilenced()` reports true), so the
+ * same phone cannot listen to its own call. Any model deployed here needs
+ * replay/room augmentation in
  * training to survive that.
  */
 class AudioCapture(private val context: Context) {
@@ -92,7 +96,10 @@ class AudioCapture(private val context: Context) {
                 while (offset < read) {
                     offset += accumulator.push(floats, offset, read - offset)
                     while (accumulator.readyToEmit()) {
-                        emit(accumulator.snapshot())
+                        // Checked per window, not once: silencing starts and
+                        // stops with the call, mid-session.
+                        val silenced = record.activeRecordingConfiguration?.isClientSilenced == true
+                        emit(accumulator.snapshot().copy(silencedBySystem = silenced))
                     }
                 }
             }

@@ -2,6 +2,7 @@ package com.phx.yugcall
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -154,16 +155,37 @@ private fun VoxShieldApp() {
         }
     }
 
+    // The foreground-service notification is the always-visible "the mic is
+    // available" indicator the overlay consent screen promises. Since Android 13
+    // it is hidden unless POST_NOTIFICATIONS is granted, so ask for it here.
+    // A refusal doesn't block the feature — the service still runs — but it is
+    // asked every time Call Protection is switched on, never silently skipped.
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { proceedPastOverlayConsent() }
+
+    fun proceedAfterMic() {
+        val needsNotificationPermission =
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        if (needsNotificationPermission) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            proceedPastOverlayConsent()
+        }
+    }
+
     fun beginOverlaySetup() {
         if (!consentStore.hasAcceptedOverlayConsent) {
             screen = AppScreen.OVERLAY_CONSENT
             return
         }
         if (!hasMicPermission) {
-            pendingMicGrantAction = { proceedPastOverlayConsent() }
+            pendingMicGrantAction = { proceedAfterMic() }
             micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else {
-            proceedPastOverlayConsent()
+            proceedAfterMic()
         }
     }
 
@@ -391,8 +413,16 @@ private fun HeroCard(state: ScreenState) {
                         fraction = null,
                         trackColor = colors.track,
                         progressColor = colors.accent,
-                        label = if (state.live.isListening) "listening…" else "idle",
-                        centerText = if (state.detectorReady) "Ready" else "—",
+                        label = when {
+                            state.live.isListening && state.live.silencedBySystem -> "mic muted by Android"
+                            state.live.isListening -> "listening…"
+                            else -> "idle"
+                        },
+                        centerText = when {
+                            state.live.isListening && state.live.silencedBySystem -> "—"
+                            state.detectorReady -> "Ready"
+                            else -> "—"
+                        },
                     )
                 }
             }
@@ -457,8 +487,8 @@ private fun CallProtectionCard(overlayRunning: Boolean, onToggle: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Text("Call Protection", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                 Text(
-                    if (overlayRunning) "Floating indicator active — drag it anywhere"
-                    else "A floating shield you can start during any call or video",
+                    if (overlayRunning) "On — you'll get a notification when a call starts"
+                    else "A small floating pill you can open during calls",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
