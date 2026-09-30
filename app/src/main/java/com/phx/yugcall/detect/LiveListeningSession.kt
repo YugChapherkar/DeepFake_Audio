@@ -6,6 +6,7 @@ import com.phx.yugcall.AnalysisOutcome
 import com.phx.yugcall.Calibration
 import com.phx.yugcall.RiskEngine
 import com.phx.yugcall.audio.AudioCapture
+import com.phx.yugcall.audio.trimToSpeech
 import com.phx.yugcall.history.ScanHistoryStore
 import com.phx.yugcall.history.ScanSource
 import kotlinx.coroutines.CancellationException
@@ -86,10 +87,14 @@ class LiveListeningSession(
                     _state.update {
                         it.copy(inputLevel = window.rms, silencedBySystem = window.silencedBySystem)
                     }
-                    if (window.isSilent) {
+                    // A short utterance inside the window is trimmed and tiled,
+                    // the way training handled short clips; too little speech
+                    // counts as skipped. See trimToSpeech for why it's conservative.
+                    val speech = if (window.isSilent) null else trimToSpeech(window.samples)
+                    if (speech == null) {
                         skipped++
                     } else {
-                        val score = withContext(Dispatchers.Default) { timedScore(window.samples) }
+                        val score = withContext(Dispatchers.Default) { timedScore(speech) }
                         scores.addLast(score)
                         while (scores.size > LIVE_WINDOW_MEMORY) scores.removeFirst()
                     }
