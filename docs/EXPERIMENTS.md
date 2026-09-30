@@ -3,10 +3,58 @@
 What was run, what came out, and what it does and does not show. Newest
 first. Every number here is copied from a log or `metrics.json`, not estimated.
 
+- [2026-09-30 — Short phrases in a live window score as genuine](#2026-09-30--short-phrases-in-a-live-window-score-as-genuine)
 - [2026-09-30 — The phone can't hear its own call, even on speakerphone](#2026-09-30--the-phone-cant-hear-its-own-call-even-on-speakerphone)
 - [2026-09-30 — Fine-tuning run 1](#2026-09-30--fine-tuning-run-1)
 - [2026-09-30 — Field report: real voice + music flagged as AI](#2026-09-30--field-report-real-voice--music-flagged-as-ai)
 - [2026-09-30 — On-device latency benchmark](#2026-09-30--on-device-latency-benchmark)
+
+---
+
+## 2026-09-30 — Short phrases in a live window score as genuine
+
+**Finding:** in live mode, short fake clips played to the phone scored as
+low as about 10% spoof. The same clips score 90%+ through Upload.
+
+**Cause:** Upload tiles a short clip to fill the 4.04 s window, the same way
+training handled short clips. Live mode scores the last 4.04 s of the
+microphone, so a 2-second phrase arrives surrounded by room silence. The model
+never trained on that shape.
+
+**Off-device test:** each clip from `testdata/clips/` placed in the middle of a
+4.04 s window of low-level noise (σ = 0.002), then scored with the bundled
+model. One window per clip, no aggregation.
+
+| Clip | Length | Window as-is | Naive trim + tile | Conservative trim | Looped playback |
+|---|---:|---:|---:|---:|---:|
+| fake 2Pac | 2.7 s | 58.2% | 99.8% | **86.9%** | 93.5% |
+| fake Arnold Schwarzenegger | 2.2 s | 88.2% | 100.0% | **100.0%** | 99.9% |
+| fake Martin Luther King | 6.5 s | 81.6% | 98.5% | 81.6% | 99.4% |
+| fake Orson Welles | 13.9 s | 16.0% | 18.2% | 16.0% | 25.3% |
+| fake Alan Watts | 1.4 s | 7.8% | — | — | 13.3% |
+| real 2Pac | 8.1 s | 2.7% | **40.7%** | 2.7% | 11.1% |
+| real Nick Offerman | 8.3 s | 16.2% | **62.4%** | 16.2% | 8.7% |
+| real Martin Luther King | 2.0 s | 0.5% | 14.5% | 3.5% | 2.3% |
+| real Arnold Schwarzenegger | 1.7 s | 0.7% | — | 2.6% | 0.8% |
+| real Alan Watts | 16.3 s | 0.0% | 0.1% | 0.0% | 0.2% |
+
+For clips longer than the window, only the first 4.04 s is used, which is why
+fake Orson Welles scores low here. The app aggregates many windows, and via
+Upload that clip scores 97.2%.
+
+- **Naive trimming** (trim to frames above 15% of peak, then tile) rescues the
+  fakes, but pushes real voices up to 62%. It trims the quiet edges of
+  continuous speech, and the tiling seam that creates reads as synthetic.
+- **Conservative trimming** only acts when speech covers less than 75% of the
+  window (frames above 5% of peak), keeping 200 ms either side. It rescues
+  short fakes and leaves continuous speech untouched. This is what shipped, as
+  `trimToSpeech` in `SpeechTrim.kt`, in the live path only; Upload is
+  unchanged.
+- **Looped playback** is the test-procedure alternative: play a short clip
+  back to back so it fills the window.
+
+**Caveat:** the noise here is added digitally. The real path is laptop
+speaker, room, then phone mic, and hasn't been re-measured with this change.
 
 ---
 
@@ -188,7 +236,8 @@ from a target false-positive rate.
 Twelve clips from held-out In-the-Wild **test** speakers, scored off-device
 with the same windowing, silence gate, 90th-percentile aggregation and
 calibration as the app. Scored as the 16-bit PCM WAV files installed in
-`Download/VoxShieldTest` on the test phone (converted from the dataset's 32-bit
+`Download/VoxShieldTest` on the test phone, and kept in
+[`testdata/clips/`](../testdata/clips/) (converted from the dataset's 32-bit
 float WAV, which moves the scores by at most 1.2 points).
 
 | Clip | Length | Spoof probability | Band | Correct |

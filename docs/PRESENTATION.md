@@ -113,7 +113,8 @@ number. [Script below](#limitations-to-state-up-front).
 - Phone charged, Do Not Disturb on, brightness up, app already open.
 - The disclaimer is already accepted, so you don't have to scroll it on
   stage. Mention it exists.
-- Test clips are in **Downloads → VoxShieldTest**. They come from speakers the
+- Test clips are in **Downloads → VoxShieldTest** on the phone, copied from
+  [`testdata/clips/`](../testdata/clips/) in the repo. They come from speakers the
   model never trained on. File names start with `real_` or `fake_`.
 - A laptop or second phone with a speaker, for the live test. If a teammate
   has an Android phone, install the app on it too: a second phone is the only
