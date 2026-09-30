@@ -20,17 +20,24 @@ package com.phx.yugcall.detect
  * taken on trust — see `OnDeviceBenchmarkTest`.
  */
 enum class ExecutionBackend(val label: String) {
-    /** Optimised fp32 CPU kernels. Default, and the expected winner on Tensor G1. */
+    /**
+     * XNNPACK kernels. Expected to win on paper, but measured at 877 ms median
+     * (2 threads) on a Pixel 6a versus 302 ms for plain [CPU] — see
+     * docs/MODEL.md. Kept for measurement on other hardware.
+     */
     XNNPACK("XNNPACK"),
 
     /** Deprecated in Android 15. Present for measurement, not because it should win. */
     NNAPI("NNAPI"),
 
-    /** ONNX Runtime's built-in CPU kernels with no accelerator. Baseline. */
+    /**
+     * ONNX Runtime's built-in CPU kernels with no accelerator. Default: fastest
+     * configuration measured on the target device (302 ms median at 2 threads).
+     */
     CPU("CPU"),
     ;
 
     companion object {
-        val DEFAULT = XNNPACK
+        val DEFAULT = CPU
     }
 }

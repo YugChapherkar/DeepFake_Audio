@@ -101,14 +101,31 @@ window (4.038 s of audio):
 | Host | Median | p95 | Real-time factor |
 |---|---|---|---|
 | x86_64 desktop | 111 ms | 329 ms | 0.028x |
+| Pixel 6a (Tensor G1, Android 17 beta) | 302 ms | 313 ms | 0.075x |
 
-**This is a desktop number and is not a phone number.** Treat it as an order of
-magnitude only. A mid-range Android SoC should be expected to land somewhere
-around 3-5x slower, i.e. roughly 300-600 ms per window, against a 1 s hop. That
-fits, but the headroom is perhaps 2-3x rather than the 100x the parameter count
-suggests — AASIST's graph attention costs far more than its weight count
-implies. **Benchmark on the actual target tier before treating the CPU path as
-settled**; `OnnxSpoofDetector` is the only place that needs to change.
+### Pixel 6a, full sweep
+
+From `OnDeviceBenchmarkTest`, 20 iterations after 3 warm-up runs. Budget is
+1000 ms (one window per second).
+
+| Backend | Threads | Median | p95 |
+|---|---|---|---|
+| **CPU** | **2** | **302 ms** | **313 ms** |
+| CPU | 1 | 489 ms | 498 ms |
+| CPU | 4 | 544 ms | 933 ms |
+| XNNPACK | 4 | 740 ms | 1001 ms |
+| XNNPACK | 2 | 877 ms | 1233 ms |
+| XNNPACK | 1 | 1117 ms | 1730 ms |
+| NNAPI | 4 | 1567 ms | 2183 ms |
+| NNAPI | 2 | 2107 ms | 2356 ms |
+| NNAPI | 1 | 3647 ms | 5683 ms |
+
+**Plain CPU at 2 threads is the default** — about 3x faster than XNNPACK, the
+previous default, whose p95 overran the budget. The likely cause is that
+XNNPACK covers only part of AASIST's graph, so the partition hand-offs plus a
+second thread pool cost more than its kernels save; that is an inference, not
+a measurement. Four threads is slower than two because Tensor G1 has only two
+big cores. NNAPI is over budget at every thread count, as expected.
 
 ## Measuring on the target device
 
@@ -122,7 +139,7 @@ adb logcat -s VoxShieldBenchmark
 `OnDeviceBenchmarkTest` sweeps every [`ExecutionBackend`] (XNNPACK, NNAPI, plain
 CPU) at 1, 2 and 4 intra-op threads, reports median and p95 per configuration,
 and fails if nothing fits inside the 1000 ms hop. The app also shows the live
-median in its status card (`aasist_l.onnx · XNNPACK x2 · 287 ms/window`), so a
+median in its status card (`aasist_l.onnx · CPU x2 · 302 ms/window`), so a
 demo doubles as a measurement.
 
 ## Target hardware: Pixel 6a (Google Tensor G1)
@@ -162,7 +179,7 @@ through a delegate.
 
 ## Why CPU and not the NPU
 
-The app runs ONNX Runtime on CPU with XNNPACK where available. The NPU path
+The app runs ONNX Runtime on plain CPU kernels (measured fastest). The NPU path
 costs more than it returns today:
 
 - NNAPI was deprecated in Android 15, so the obvious delegate is a dead end.
