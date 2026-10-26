@@ -43,10 +43,20 @@ fun InCallBanner(modifier: Modifier = Modifier, compact: Boolean = false) {
             modifier = Modifier.size(if (compact) 16.dp else 20.dp),
         )
         Spacer(Modifier.width(8.dp))
+        // Measured on a Pixel 6a: Android silences third-party capture for the
+        // whole cellular call, speakerphone included. Earlier copy suggested
+        // speakerphone as a workaround; it isn't one on the same phone.
         Text(
-            "In a call — Android blocks direct call audio for every app, this " +
-                "one included. Switch to speakerphone so the mic can pick up " +
-                "the other person's voice.",
+            if (compact) {
+                "In a call — Android mutes every app's microphone, even on " +
+                    "speakerphone. Use VoxShield on a second phone near the " +
+                    "speaker, or Upload a recording afterwards."
+            } else {
+                "In a call — Android mutes the microphone for every app during " +
+                    "a call, even on speakerphone, so this phone can't check the " +
+                    "other person's voice. Run VoxShield on a second phone near " +
+                    "the speaker, or check a recording afterwards with Upload."
+            },
             style = if (compact) MaterialTheme.typography.labelSmall else MaterialTheme.typography.bodySmall,
             color = colors.content,
         )

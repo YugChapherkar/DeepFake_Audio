@@ -39,6 +39,14 @@ object AudioFormatSpec {
 data class AudioWindow(
     val samples: FloatArray,
     val rms: Float,
+    /**
+     * True when Android itself is feeding this app silence instead of the
+     * microphone — `AudioRecordingConfiguration.isClientSilenced()`. During a
+     * cellular call this is true for every third-party app, speakerphone or
+     * not, so a silent window here means "the OS is blocking us", not "nobody
+     * is talking".
+     */
+    val silencedBySystem: Boolean = false,
 ) {
     val isSilent: Boolean get() = rms < AudioFormatSpec.SILENCE_RMS_THRESHOLD
 
@@ -47,10 +55,12 @@ data class AudioWindow(
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is AudioWindow) return false
-        return rms == other.rms && samples.contentEquals(other.samples)
+        return rms == other.rms && silencedBySystem == other.silencedBySystem &&
+            samples.contentEquals(other.samples)
     }
 
-    override fun hashCode(): Int = 31 * samples.contentHashCode() + rms.hashCode()
+    override fun hashCode(): Int =
+        (31 * samples.contentHashCode() + rms.hashCode()) * 31 + silencedBySystem.hashCode()
 }
 
 /** Root-mean-square of [n] samples starting at 0. */

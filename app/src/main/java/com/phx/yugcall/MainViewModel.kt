@@ -59,7 +59,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private val voxApp get() = getApplication<VoxShieldApplication>()
     private val decoder = AudioDecoder(application)
-    private val riskEngine = RiskEngine()
+    private val riskEngine = RiskEngine(calibration = Calibration.BUNDLED_MODEL)
     private val callStateMonitor = CallStateMonitor(application)
 
     private var analyseJob: Job? = null

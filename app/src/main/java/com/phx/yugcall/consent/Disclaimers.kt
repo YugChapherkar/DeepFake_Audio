@@ -27,12 +27,12 @@ object Disclaimers {
             "even a calibrated number as an estimate, not a measurement.",
         "Everything runs on this device. Audio is analysed in memory and " +
             "discarded; nothing is uploaded, and the app has no network access.",
-        "This app cannot analyse the other side of a live cellular call " +
-            "directly. Android silences microphone access for every app, " +
-            "including this one, the instant a call is active — no permission " +
-            "lifts this. The call-protection overlay only works over " +
-            "speakerphone, a video call, or any other audio your microphone " +
-            "can actually pick up from the room.",
+        "This phone cannot check its own live phone call. Android mutes the " +
+            "microphone for every app, including this one, for as long as a " +
+            "call is active — even on speakerphone — and no permission lifts " +
+            "this. To check a caller live, run VoxShield on a second phone " +
+            "held near the call's speaker. Recordings and voicemails can be " +
+            "checked afterwards with Upload.",
     )
 
     val overlayPoints = listOf(
@@ -42,12 +42,13 @@ object Disclaimers {
             "\"all-party\" consent — and rules vary by state and country. You " +
             "are responsible for knowing and following the law that applies to " +
             "you and the other party before you turn this on.",
-        "This cannot listen to a live cellular call directly. Android blocks " +
-            "microphone capture for every third-party app the moment a call is " +
-            "active — put the call on speakerphone (or use a video/VoIP call) " +
-            "so the microphone can pick up the other person's voice from the " +
-            "room. The overlay will tell you plainly when it cannot see call " +
-            "audio instead of guessing.",
+        "It cannot hear a call on this same phone. Android mutes every " +
+            "third-party app's microphone for the whole of a phone call, even " +
+            "on speakerphone. The overlay still shows during calls and tells " +
+            "you plainly when Android is muting it. To check a caller live, " +
+            "run VoxShield on a second phone near the call's speaker. Video " +
+            "and internet calling apps hold the microphone too, and haven't " +
+            "been tested.",
         "The floating bubble draws over other apps. That is what lets it stay " +
             "visible during a call, but it is also a permission real security " +
             "tools warn about, because a malicious app could abuse it to " +

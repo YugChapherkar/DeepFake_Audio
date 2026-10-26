@@ -1,128 +1,215 @@
 # VoxShield: AI Voice Deepfake Detection & Call Protection
 
-VoxShield is a privacy-first Android security application that analyzes voice communication in near real time, estimates the likelihood of synthetic or manipulated speech, and warns users when a caller or recording may be using an AI-generated or cloned voice.
+VoxShield is a privacy-focused Android security application that analyzes voice
+communication in near real time, estimates the likelihood of synthetic or
+manipulated speech, and warns users when a caller may be using an AI-generated
+or cloned voice.
 
-**Inference runs 100% on-device.** Audio is analyzed locally in memory and never leaves the phone.
-
----
-
-## 🌟 Key Features
-
-- **100% On-Device AI Inference**: Uses the lightweight **AASIST-L** model (`aasist_l.onnx`, ~1.16 MB) running via ONNX Runtime on CPU/XNNPACK. Zero data is sent to external servers.
-- **Real-Time Audio Analysis**: Captures 16 kHz mono PCM audio in 4.04-second overlapping windows (64,600 samples) emitted once per second.
-- **Silence Gating**: Automatically skips silent/ambient noise windows using RMS thresholding to preserve battery and compute resources.
-- **Audio File Analysis**: Built-in `MediaCodec` decoder allows users to upload and evaluate recorded call files or voice notes (WAV, MP3, M4A, etc.).
-- **Multi-Window Risk Engine**: Aggregates predictions across multiple time windows using 90th percentile scoring to eliminate false positives from single noisy windows.
-- **Privacy-First Architecture**: Audio is scored in volatile memory and discarded immediately. No cloud transmission, no disk logging.
+**Inference runs entirely on the device.** No audio leaves the phone.
 
 ---
 
 ## 📂 Project Structure
 
-The project follows an MVVM (Model-View-ViewModel) architecture built with Jetpack Compose.
+MVVM with Jetpack Compose.
 
 ```text
-app/
-├── src/main/
-│   ├── assets/
-│   │   └── aasist_l.onnx           # Pretrained AASIST-L countermeasure model (~1.16 MB)
-│   └── java/com/phx/yugcall/
-│       ├── MainActivity.kt         # Compose UI: Status card, Level meter, Results, Scan history
-│       ├── MainViewModel.kt        # State management, Audio capture loop, File decode bridge
-│       ├── RiskEngine.kt           # Score calibration, Thresholds, Multi-window aggregation
-│       ├── audio/
-│       │   ├── AudioFormatSpec.kt  # 16 kHz / 64,600-sample window contract
-│       │   ├── AudioCapture.kt     # AudioRecord streaming -> Overlapping PCM windows
-│       │   └── AudioDecoder.kt     # MediaCodec -> 16 kHz mono float PCM decoder
-│       ├── detect/
-│       │   ├── SpoofDetector.kt    # Detector interface, Result models, Padding utilities
-│       │   ├── OnnxSpoofDetector.kt# ONNX Runtime session & inference execution
-│       │   └── ExecutionBackend.kt # CPU, XNNPACK, and NNAPI backend selectors
-│       └── ui/theme/               # Material3 theme, Typography, and Risk color palettes
-├── src/androidTest/
-│   └── java/com/phx/yugcall/detect/
-│       └── OnDeviceBenchmarkTest.kt# On-device latency and throughput test harness
-├── docs/
-│   └── MODEL.md                    # Deep dive into model architecture, export, & limits
-└── tools/
-    └── export_aasist_onnx.py       # PyTorch to ONNX export script for AASIST-L
+app/src/main/java/com/phx/yugcall/
+├── VoxShieldApplication.kt  # App-wide model instance + shared live session
+├── MainActivity.kt          # Compose UI: hero gauge, actions, scan history
+├── MainViewModel.kt         # Coordinates the shared session + file analysis
+├── RiskEngine.kt            # Calibration, thresholds, multi-window aggregation
+├── audio/
+│   ├── AudioFormatSpec.kt   # The 16 kHz / 64,600-sample contract
+│   ├── AudioCapture.kt      # AudioRecord -> overlapping PCM windows
+│   └── AudioDecoder.kt      # MediaCodec -> 16 kHz mono float PCM
+├── detect/
+│   ├── SpoofDetector.kt          # Detector interface, score types, padding
+│   ├── OnnxSpoofDetector.kt      # ONNX Runtime session
+│   ├── ExecutionBackend.kt       # XNNPACK / NNAPI / CPU selection
+│   └── LiveListeningSession.kt   # Mic + model + aggregation, shared by app & overlay
+├── history/
+│   └── ScanHistory.kt       # App-wide scan history (LIVE / OVERLAY / FILE)
+├── consent/
+│   ├── Disclaimers.kt           # Canonical disclaimer copy
+│   ├── ConsentStore.kt          # Tracks acceptance (SharedPreferences)
+│   ├── DisclaimerScreen.kt      # First-run gate, scroll-to-unlock
+│   └── OverlayConsentScreen.kt  # Second gate before Call Protection
+├── overlay/
+│   ├── CallGuardOverlayService.kt # Foreground service hosting the bubble
+│   ├── OverlayBubble.kt           # Collapsed/expanded Compose UI
+│   ├── OverlayLifecycleOwner.kt   # Lifecycle plumbing for a WindowManager view
+│   ├── OverlayPermission.kt       # SYSTEM_ALERT_WINDOW helpers
+│   └── CallStateMonitor.kt        # Detects an active call (AudioManager.mode)
+└── ui/
+    ├── theme/                # Material3 theme, dynamic colour, risk palette
+    └── components/           # RiskGauge, InCallBanner
+
+app/src/main/assets/aasist_l.onnx   # Fine-tuned AASIST-L (see docs/MODEL.md)
+tools/export_aasist_onnx.py         # Exports a checkpoint to ONNX with a parity check
+tools/finetune_aasist.py            # Fine-tuning + evaluation job (see docs/TRAINING.md)
 ```
 
----
+## 📞 Call Protection (floating overlay)
 
-## 🧠 The AI Model: AASIST-L
+A small pill-shaped indicator that floats over any other app, including the
+phone app's call screen. It shows only an icon and a short status ("Tap to
+check", "Listening…", "High · 97%", "Muted by Android").
 
-VoxShield uses **AASIST-L** (*Audio Anti-Spoofing using Integrated Spectro-Temporal Graph Attention Networks*):
+**How it behaves:**
+- **Arming.** The Call Protection switch arms it, and the pill appears straight
+  away.
+- **During a call.** When a call starts, a heads-up "Call detected"
+  notification appears; tapping it opens the pill. The ongoing notification
+  also has **Show** and **Stop** actions.
+- **Using the pill.** Tap it to start or stop a check. Drag it anywhere. Drop it
+  on the target that appears at the bottom of the screen while dragging to hide
+  it. Protection stays armed, so the next call notifies again.
+- **One session, one history.** The pill starts and stops the same shared
+  listening session as the in-app "Listen" button, so its scans land in Recent
+  Scans like any other.
 
-| Metric / Property | Value |
-| :--- | :--- |
-| **Parameters** | 85,306 (~1.16 MB fp32 ONNX) |
-| **Input Contract** | 64,600 float32 samples (4.038 s at 16 kHz Mono) |
-| **Output** | `[logits_spoof, logits_bonafide]` |
-| **Execution Provider** | CPU / XNNPACK multi-threading |
-| **Inference Time** | ~200-400 ms per window on mobile CPUs |
+**What it cannot do — by Android's design, not this app's:** capture the other
+side of a live cellular call directly. Android silences microphone input from
+every third-party app, this one included, the instant `MODE_IN_CALL` or
+`MODE_IN_COMMUNICATION` is active — there is no permission that lifts this
+([source](https://developer.android.com/media/platform/sharing-audio-input)).
+**Speakerphone does not get around this on the same phone.** Measured on a
+Pixel 6a during a speakerphone call: the system's recording monitor reported
+this app's capture as `silenced:true` for the whole call. So the phone taking
+the call can't check it. What works:
 
-For model details, calibration status, and benchmark logs, see [`docs/MODEL.md`](docs/MODEL.md).
+- VoxShield on a **second phone** held near the call's speaker. That phone
+  isn't in a call, so it isn't silenced.
+- **Upload**, for recordings and voicemails afterwards.
 
----
+The app reads `AudioRecordingConfiguration.isClientSilenced()` and shows "Muted
+by Android" instead of an endless "Listening…". Video and internet calling
+apps hold the microphone too and haven't been tested.
 
-## 🗺️ Step-by-Step Project Roadmap
+**Setup requires two separate consent screens, then two permissions:**
+1. The general disclaimer (`DisclaimerScreen`), required before anything else.
+2. `OverlayConsentScreen` — specific to this feature, covering call-recording
+   consent law and the `SYSTEM_ALERT_WINDOW` permission's own risk profile.
+3. `RECORD_AUDIO`, if not already granted.
+4. `SYSTEM_ALERT_WINDOW`, granted only through Settings (there is no runtime
+   dialog for it).
 
-### Phase 1: Foundation & On-Device ML (Current State)
-- [x] Modern Jetpack Compose Material3 UI.
-- [x] Real-time 16 kHz PCM streaming (`AudioRecord` with `UNPROCESSED` source).
-- [x] File decoding pipeline (`MediaCodec` -> 16 kHz mono float PCM).
-- [x] On-device ONNX inference engine (`AASIST-L`).
-- [x] Silence gating & 90th-percentile multi-window risk aggregation.
-- [x] On-device benchmark test suite (`OnDeviceBenchmarkTest`).
+A persistent low-priority notification stays visible for as long as the
+service can access the microphone, with a one-tap Stop action.
 
-### Phase 2: Score Calibration & Dataset Fine-Tuning (Next Up)
-- [ ] Fit Platt calibration on held-out validation data for accurate probability rendering.
-- [ ] Train with RawBoost and codec augmentations (AMR-NB, Opus, µ-law) for real telephony noise.
-- [ ] Implement room-impulse-response (RIR) augmentation for speakerphone re-recording scenarios.
+## 🔬 How it works
 
-### Phase 3: Hybrid Backend Pipeline (Optional Extension)
-- [ ] **FastAPI Inference Service**: Build a cloud service for running heavier models (WavLM, XLS-R).
-- [ ] **Local-First Routing**: Fast screening on-device; cloud verification for low-confidence samples.
-- [ ] **WebSocket Streaming**: Binary WS protocol for real-time remote inference.
+1. `AudioCapture` opens `AudioRecord` at 16 kHz mono PCM, preferring the
+   `UNPROCESSED` source so AGC and noise suppression do not erase the artefacts
+   the model looks for.
+2. Samples accumulate into 64,600-sample (~4.04 s) windows, emitted once per
+   second. Windows below an RMS silence gate are skipped rather than scored.
+3. `OnnxSpoofDetector` runs AASIST-L over each window and returns two logits.
+4. `RiskEngine` converts the bona fide margin to a probability through a
+   calibration step, then aggregates the last ~15 windows at the 90th percentile
+   so a single noisy window cannot escalate a whole call.
+5. The UI shows the risk band, how many windows backed it, and — while the model
+   is uncalibrated — explicitly declines to render a percentage.
 
-### Phase 4: Call Hooks & Verification
-- [ ] **Foreground Service**: Background microphone monitoring with proper notification state.
-- [ ] **CallScreeningService**: Caller-ID screening integration.
-- [ ] **Trusted Contacts**: Family identity verification workflow.
+**Read [`docs/MODEL.md`](docs/MODEL.md) before trusting any number this app
+produces.** The bundled model is AASIST-L fine-tuned for real-world audio: 9.2%
+EER on held-out In-the-Wild speakers, down from 41% for the pretrained
+checkpoint. It has never been measured on phone-microphone audio, its
+calibration reflects its dev split's class balance, and the risk thresholds are
+still placeholders.
 
----
+## 📚 Docs
 
-## 🛠️ Optional Backend Specification (For Server Developers)
+| Doc | What's in it |
+|---|---|
+| [`docs/PRESENTATION.md`](docs/PRESENTATION.md) | Presenter's brief: talk track, live demo script, likely questions |
+| [`docs/MODEL.md`](docs/MODEL.md) | The bundled model, calibration, latency, the Pixel 6a NPU question |
+| [`docs/TRAINING.md`](docs/TRAINING.md) | How the model is fine-tuned on Kaggle and shipped |
+| [`docs/EXPERIMENTS.md`](docs/EXPERIMENTS.md) | Every run and measurement, with results |
+| [`docs/ASVSPOOF5.md`](docs/ASVSPOOF5.md) | Notes on the ASVspoof 5 paper and what it changes here |
 
-If expanding VoxShield with an optional cloud inference backend:
+## 🗺️ Roadmap
 
-### Stack
-- **Framework:** FastAPI (Python 3.10+)
-- **Backbone Models:** Wav2Vec 2.0, HuBERT, or WavLM (Fine-tuned on ASVspoof 2021).
-- **Target Hardware:** NVIDIA T4 / A10G GPU.
+### Phase 1: Foundation — done
+- [x] Compose UI, permissions, scan history.
+- [x] Streaming 16 kHz PCM capture (`AudioRecord`).
+- [x] File decode and analysis (`MediaCodec`).
+- [x] On-device ONNX inference with pretrained AASIST-L.
+- [x] Silence gating, multi-window aggregation, honest "unavailable" state.
 
-### Key Endpoints
-1. `POST /v1/analyze`: Upload `multipart/form-data` audio file -> Resample to 16kHz mono -> Return `synthetic_probability` & `risk_level`.
-2. `WS /v1/stream`: Binary WebSocket endpoint -> Accept raw 16kHz PCM chunks -> Return real-time score updates every 500ms.
+### Phase 2: Make the number mean something — in progress
+- [x] Fit Platt calibration on a held-out validation split.
+- [ ] Derive risk thresholds from a target false-positive rate.
+- [x] Report EER on a corpus that was never trained on (held-out In-the-Wild speakers).
+- [ ] Measure on phone-microphone recordings from the target device.
+- [ ] Replace the linear resampler in `AudioDecoder` with windowed-sinc.
 
----
+### Phase 3: Robustness
+- [x] Fine-tune with music/noise, reverb and telephone (8 kHz + µ-law) augmentation.
+- [ ] Real codec augmentation (Opus, AMR-NB, Speex) and ASVspoof 5 training data.
+- [ ] Test fake voices with background noise (suspected "noise means real" shortcut).
+- [ ] On-device latency and battery benchmarks per SoC tier.
 
-## 🛠️ Building & Running
+### Phase 4: Call integration
+- [x] Foreground service with `microphone` type — the Call Protection overlay.
+- [x] Floating draggable indicator, shared live session, in-call honesty banner.
+- [ ] `CallScreeningService` for caller-ID-based screening (note: gives number, never audio).
+- [ ] "Trusted contact" verification workflow.
 
-### Prerequisites
-- JDK 21
-- Android SDK 35+
-- Android Device or Emulator (API 29+)
+### Phase 5: Optimization
+- [x] On-device benchmark across execution backends and thread counts.
+- [ ] int8 quantization — currently blocked by a shape inconsistency inside
+      AASIST's attention subgraph; needs graph surgery. See `docs/MODEL.md`.
+- [ ] Evaluate a conv-only architecture (log-mel + MobileNetV3) if offload ever
+      becomes necessary. On Tensor G1 the TPU is not reachable at all.
 
-### Commands
+## ⚠️ Platform constraints worth knowing up front
+
+- **You cannot capture call audio on a stock device.** `VOICE_CALL` /
+  `VOICE_DOWNLINK` require the privileged `CAPTURE_AUDIO_OUTPUT` permission.
+  `CallScreeningService` gives you the caller's number, not their voice, and
+  the microphone is muted for every third-party app during a call — even on
+  speakerphone (measured on a Pixel 6a). The only route for a normal app is a
+  second device listening to the call's speaker, which means the far end
+  arrives re-recorded through a room.
+- **The Pixel 6a's TPU cannot be used.** Google's Tensor SDK covers Tensor
+  G5/G6 (Pixel 10) only; ONNX Runtime has no Edge TPU provider; and NNAPI — the
+  one theoretical route — is deprecated as of Android 15, needs int8, and does
+  not cover AASIST's graph attention. The app runs on CPU and measures itself.
+
+## ⚠️ Legal: recording consent
+
+Many jurisdictions require **every** party's consent before a call can be
+recorded or analysed — often called "two-party" or "all-party" consent — and
+the rules vary by state and country. **You are responsible for knowing and
+following the law that applies to you and the other party** before enabling
+Call Protection. `OverlayConsentScreen` states this and requires an explicit
+checkbox before the feature can be turned on; it does not and cannot make the
+feature legal to use in a given situation.
+
+## 🔒 Privacy
+
+- Audio is captured, scored and discarded in memory. Nothing is written to disk
+  and nothing is transmitted.
+- There is no network code in the app. `INTERNET` is not declared at all.
+- The floating overlay only ever renders VoxShield's own risk indicator. It
+  does not read, intercept, or overlay content from any other app.
+
+## 🛠️ Building
+
 ```bash
-./gradlew :app:assembleDebug             # Build debug APK
-./gradlew :app:testDebugUnitTest         # Run JVM unit tests
-./gradlew :app:connectedDebugAndroidTest # Run on-device inference benchmark
+./gradlew :app:assembleDebug            # per-ABI APKs
+./gradlew :app:testDebugUnitTest        # unit tests (JVM)
+./gradlew :app:connectedDebugAndroidTest # on-device inference benchmark
+adb logcat -s VoxShieldBenchmark        # ...and its results
 ```
 
----
+Requires JDK 21 and the Android SDK. The build uses AGP 9's built-in Kotlin
+support, so the `org.jetbrains.kotlin.android` plugin is deliberately **not**
+applied — adding it will break the build.
 
-## 📄 License & Attribution
-- Pretrained AASIST model weights derived from [clovaai/aasist](https://github.com/clovaai/aasist) (MIT License, © NAVER Corp.).
+## 📄 Third-party
+
+The bundled model derives from [clovaai/aasist](https://github.com/clovaai/aasist),
+MIT licensed, © NAVER Corp. See `docs/MODEL.md`.

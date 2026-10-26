@@ -31,6 +31,20 @@ data class Calibration(
 
     companion object {
         val UNFITTED = Calibration(slope = 1f, intercept = 0f, fitted = false)
+
+        /**
+         * Fitted for the bundled `aasist_l.onnx` (fine-tuned AASIST-L, run of
+         * 2026-09-30) by logistic regression on its pooled dev split: ASVspoof
+         * 2019 LA dev (4,000 clips) plus held-out In-the-Wild dev speakers
+         * (3,605 clips). See docs/EXPERIMENTS.md.
+         *
+         * Tied to that exact model file. Replacing the asset without refitting
+         * makes these numbers wrong — switch back to [UNFITTED] instead.
+         *
+         * The probability it yields reflects the dev split's class balance
+         * (about a third bona fide), not how often real callers are synthetic.
+         */
+        val BUNDLED_MODEL = Calibration(slope = 1.6442840f, intercept = 0.3187831f, fitted = true)
     }
 }
 

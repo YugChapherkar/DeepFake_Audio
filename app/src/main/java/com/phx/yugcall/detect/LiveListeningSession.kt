@@ -3,8 +3,10 @@ package com.phx.yugcall.detect
 import android.Manifest
 import androidx.annotation.RequiresPermission
 import com.phx.yugcall.AnalysisOutcome
+import com.phx.yugcall.Calibration
 import com.phx.yugcall.RiskEngine
 import com.phx.yugcall.audio.AudioCapture
+import com.phx.yugcall.audio.trimToSpeech
 import com.phx.yugcall.history.ScanHistoryStore
 import com.phx.yugcall.history.ScanSource
 import kotlinx.coroutines.CancellationException
@@ -25,6 +27,8 @@ data class LiveState(
     val inputLevel: Float = 0f,
     val medianInferenceMillis: Double? = null,
     val error: String? = null,
+    /** Android is feeding us silence — during a call, for every third-party app. */
+    val silencedBySystem: Boolean = false,
 ) {
     val detectorReady: Boolean get() = detectorState is DetectorState.Ready
 }
@@ -46,7 +50,7 @@ class LiveListeningSession(
     private val capture: AudioCapture,
     private val detectorProvider: suspend () -> SpoofDetector,
     private val history: ScanHistoryStore,
-    private val riskEngine: RiskEngine = RiskEngine(),
+    private val riskEngine: RiskEngine = RiskEngine(calibration = Calibration.BUNDLED_MODEL),
 ) {
     private val _state = MutableStateFlow(LiveState())
     val state: StateFlow<LiveState> = _state.asStateFlow()
@@ -80,11 +84,17 @@ class LiveListeningSession(
         listenJob = scope.launch {
             try {
                 capture.windows().collect { window ->
-                    _state.update { it.copy(inputLevel = window.rms) }
-                    if (window.isSilent) {
+                    _state.update {
+                        it.copy(inputLevel = window.rms, silencedBySystem = window.silencedBySystem)
+                    }
+                    // A short utterance inside the window is trimmed and tiled,
+                    // the way training handled short clips; too little speech
+                    // counts as skipped. See trimToSpeech for why it's conservative.
+                    val speech = if (window.isSilent) null else trimToSpeech(window.samples)
+                    if (speech == null) {
                         skipped++
                     } else {
-                        val score = withContext(Dispatchers.Default) { timedScore(window.samples) }
+                        val score = withContext(Dispatchers.Default) { timedScore(speech) }
                         scores.addLast(score)
                         while (scores.size > LIVE_WINDOW_MEMORY) scores.removeFirst()
                     }
@@ -108,7 +118,9 @@ class LiveListeningSession(
         val outcome = riskEngine.assess(scores.toList(), skipped)
         scores.clear()
         skipped = 0
-        _state.update { it.copy(isListening = false, inputLevel = 0f, outcome = outcome) }
+        _state.update {
+            it.copy(isListening = false, inputLevel = 0f, outcome = outcome, silencedBySystem = false)
+        }
         history.add(outcome, source)
         return outcome
     }
